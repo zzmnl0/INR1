@@ -102,5 +102,51 @@ class TECDataManager:
         # 归一化到[0, 1]
         val_norm = (val - self.min_tec) / self.denom
         val_norm = torch.clamp(val_norm, 0.0, 1.0)
-        
+
         return val_norm
+
+    def get_tec_map_sequence(self, time_end):
+        """
+        获取 TEC 地图序列（用于 ConvLSTM）
+
+        Args:
+            time_end: [Batch] 结束时间（小时）
+
+        Returns:
+            [Batch, Seq_Len, 1, H, W] TEC 地图序列（归一化）
+        """
+        batch_size = time_end.shape[0]
+        device = time_end.device
+
+        # 生成时间序列: [t - seq_len + 1, ..., t]
+        offsets = torch.arange(self.seq_len, device=device).flip(0)  # [Seq]
+        time_seq = time_end.unsqueeze(1) - offsets.unsqueeze(0)  # [Batch, Seq]
+
+        # 将时间归一化到 [0, T-1] 索引范围
+        time_indices = time_seq.clamp(0, self.total_hours - 1)  # [Batch, Seq]
+
+        # 转换为整数索引（四舍五入）
+        time_indices_int = time_indices.round().long()  # [Batch, Seq]
+
+        # 从 tec_vol [1, 1, Time, Lat, Lon] 中提取地图
+        # 使用高级索引一次性提取所有地图（避免循环）
+        # tec_vol: [1, 1, Time, Lat, Lon] -> [Time, Lat, Lon]
+        tec_data = self.tec_vol.squeeze(0).squeeze(0)  # [Time, Lat, Lon]
+
+        # 展平索引以便批量提取
+        flat_indices = time_indices_int.view(-1)  # [Batch * Seq]
+
+        # 批量索引：[Batch*Seq, Lat, Lon]
+        flat_maps = tec_data[flat_indices]
+
+        # 重塑为 [Batch, Seq, Lat, Lon]
+        tec_maps = flat_maps.view(batch_size, self.seq_len, self.target_h, self.target_w)
+
+        # 添加通道维度：[Batch, Seq, 1, Lat, Lon]
+        tec_maps = tec_maps.unsqueeze(2)
+
+        # 归一化到 [0, 1]
+        tec_maps_norm = (tec_maps - self.min_tec) / self.denom
+        tec_maps_norm = torch.clamp(tec_maps_norm, 0.0, 1.0)
+
+        return tec_maps_norm
