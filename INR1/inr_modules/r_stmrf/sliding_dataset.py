@@ -61,7 +61,7 @@ class SlidingWindowBatchProcessor:
         coords = torch.stack([lat, lon, alt, time], dim=1)  # [Batch, 4]
 
         # 查询空间天气序列
-        sw_seq = self.sw_manager.get_window_features(time)  # [Batch, Seq, 2]
+        sw_seq = self.sw_manager.get_drivers_sequence(time)  # [Batch, Seq, 2]
 
         # 查询 TEC 地图序列（用于 ConvLSTM）
         tec_map_seq = self.tec_manager.get_tec_map_sequence(time)  # [Batch, Seq, 1, H, W]
@@ -164,7 +164,7 @@ if __name__ == '__main__':
             self.seq_len = seq_len
             self.device = device
 
-        def get_window_features(self, time_batch):
+        def get_drivers_sequence(self, time_batch):
             batch_size = time_batch.shape[0]
             return torch.randn(batch_size, self.seq_len, 2).to(self.device)
 
