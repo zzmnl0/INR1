@@ -37,7 +37,7 @@ class SlidingWindowBatchProcessor:
 
     def process_batch(self, batch_data):
         """
-        处理一个批次的 FY 数据
+        处理一个批次的 FY 数据（优化版：识别唯一时间窗口，避免重复计算 ConvLSTM）
 
         Args:
             batch_data: [Batch, 5] Tensor
@@ -47,7 +47,8 @@ class SlidingWindowBatchProcessor:
             coords: [Batch, 4] (Lat, Lon, Alt, Time)
             target_ne: [Batch, 1] 真值 Ne（对数）
             sw_seq: [Batch, Seq, 2] 空间天气序列
-            tec_map_seq: [Batch, Seq, 1, H, W] TEC 地图序列
+            unique_tec_map_seq: [N_unique, Seq, 1, H, W] 唯一时间窗口的 TEC 地图序列
+            tec_indices: [Batch] 每个样本对应的唯一时间窗口索引
             target_tec_map: [Batch, 1, H, W] 当前时刻 TEC 地图
         """
         # 解析批次数据
@@ -60,16 +61,28 @@ class SlidingWindowBatchProcessor:
         # 构建坐标
         coords = torch.stack([lat, lon, alt, time], dim=1)  # [Batch, 4]
 
-        # 查询空间天气序列
-        sw_seq = self.sw_manager.get_window_features(time)  # [Batch, Seq, 2]
+        # 查询空间天气序列（点级，不需要去重）
+        sw_seq = self.sw_manager.get_drivers_sequence(time)  # [Batch, Seq, 2]
 
-        # 查询 TEC 地图序列（用于 ConvLSTM）
-        tec_map_seq = self.tec_manager.get_tec_map_sequence(time)  # [Batch, Seq, 1, H, W]
+        # ==================== 关键优化：识别唯一时间窗口 ====================
+        # TEC 是区域级背景场，应该被所有 query points 共享
+        # 1. 识别 batch 内的唯一时间索引
+        time_indices_int = time.round().long()  # 将时间四舍五入为整数索引
+        unique_time_indices, inverse_indices = torch.unique(time_indices_int, return_inverse=True)
+        # unique_time_indices: [N_unique] 唯一的时间索引
+        # inverse_indices: [Batch] 每个样本对应的唯一索引位置
 
-        # 提取当前时刻的 TEC 地图（用于 Loss 计算）
-        target_tec_map = tec_map_seq[:, -1, :, :, :]  # [Batch, 1, H, W]
+        # 2. 只对唯一时间窗口查询 TEC 地图序列
+        # 创建唯一时间的张量用于查询
+        unique_times = unique_time_indices.float()  # 转回浮点数
+        unique_tec_map_seq = self.tec_manager.get_tec_map_sequence(unique_times)
+        # unique_tec_map_seq: [N_unique, Seq, 1, H, W]
 
-        return coords, target_ne, sw_seq, tec_map_seq, target_tec_map
+        # 3. 为每个样本提取对应的当前时刻 TEC 地图（用于 Loss 计算）
+        # 使用 inverse_indices 索引对应的 TEC map
+        target_tec_map = unique_tec_map_seq[inverse_indices, -1, :, :, :]  # [Batch, 1, H, W]
+
+        return coords, target_ne, sw_seq, unique_tec_map_seq, inverse_indices, target_tec_map
 
 
 def get_r_stmrf_dataloaders(fy_path, val_days, batch_size, bin_size_hours,
@@ -164,7 +177,7 @@ if __name__ == '__main__':
             self.seq_len = seq_len
             self.device = device
 
-        def get_window_features(self, time_batch):
+        def get_drivers_sequence(self, time_batch):
             batch_size = time_batch.shape[0]
             return torch.randn(batch_size, self.seq_len, 2).to(self.device)
 
@@ -198,14 +211,20 @@ if __name__ == '__main__':
     print(f"\n输入批次数据: {batch_data.shape}")
 
     # 处理批次
-    coords, target_ne, sw_seq, tec_map_seq, target_tec_map = processor.process_batch(batch_data)
+    coords, target_ne, sw_seq, unique_tec_map_seq, tec_indices, target_tec_map = processor.process_batch(batch_data)
 
     print("\n输出形状:")
     print(f"  coords: {coords.shape}")
     print(f"  target_ne: {target_ne.shape}")
     print(f"  sw_seq: {sw_seq.shape}")
-    print(f"  tec_map_seq: {tec_map_seq.shape}")
+    print(f"  unique_tec_map_seq: {unique_tec_map_seq.shape}")
+    print(f"  tec_indices: {tec_indices.shape}")
     print(f"  target_tec_map: {target_tec_map.shape}")
+
+    print("\n唯一时间窗口统计:")
+    print(f"  Batch size: {batch_size}")
+    print(f"  唯一时间窗口数: {unique_tec_map_seq.shape[0]}")
+    print(f"  重复率: {batch_size / unique_tec_map_seq.shape[0]:.2f}x")
 
     print("\n数据范围检查:")
     print(f"  Lat: [{coords[:, 0].min().item():.2f}, {coords[:, 0].max().item():.2f}]")

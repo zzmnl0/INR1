@@ -77,9 +77,10 @@ class R_STMRF_Model(nn.Module):
         # 环境特征维度
         self.env_hidden_dim = config.get('env_hidden_dim', 64)
 
-        # ==================== 分支 A: 空间分支 ====================
-        # 空间基函数网络 (SIREN)
+        # ==================== 分支 A: 空间分支（主路）====================
+        # 空间基函数网络 (SIREN) - 主建模网络
         # 输入: (Lat, Lon, Alt, sin_lt, cos_lt) = 5维
+        # 职责: 学习电子密度的空间表达能力（无时序约束）
         self.spatial_basis_net = ModulatedSIRENNet(
             in_features=5,
             hidden_features=self.siren_hidden,
@@ -88,7 +89,9 @@ class R_STMRF_Model(nn.Module):
             omega_0=self.omega_0
         )
 
-        # 空间上下文编码器 (ConvLSTM)
+        # 空间上下文编码器 (ConvLSTM) - Context，非主建模网络
+        # 职责: 提取 TEC 的水平梯度分布及其时序演化模式
+        # 输出: 2D 特征场 M(t, lat, lon)，用于调制空间基函数
         self.spatial_context_encoder = SpatialContextEncoder(
             input_dim=1,
             hidden_dim=self.tec_feat_dim,
@@ -97,7 +100,9 @@ class R_STMRF_Model(nn.Module):
         )
 
         # 空间调制头（FiLM: gamma * h + beta）
-        # 将采样后的 TEC 特征映射为调制参数
+        # 职责: 将 TEC 特征映射为调制参数
+        # gamma: 控制水平梯度强弱（梯度扩散/增强/抑制）
+        # beta: 低频偏移项（可弱化）
         self.spatial_modulation_head = nn.Sequential(
             nn.Linear(self.tec_feat_dim, self.basis_dim * 2),
             nn.Tanh()
@@ -203,14 +208,15 @@ class R_STMRF_Model(nn.Module):
         history_times = current_time_batch.unsqueeze(1) - offsets.unsqueeze(0)
         return history_times < 0
 
-    def forward(self, coords, sw_seq, tec_map_seq):
+    def forward(self, coords, sw_seq, unique_tec_map_seq, tec_indices):
         """
-        前向传播
+        前向传播（优化版：ConvLSTM 作用于区域级背景场，不依赖 batch 维度）
 
         Args:
             coords: [Batch, 4] (Lat, Lon, Alt, Time)
             sw_seq: [Batch, Seq, 2] 空间天气序列 (Kp, F10.7)
-            tec_map_seq: [Batch, Seq, 1, H, W] TEC 地图序列
+            unique_tec_map_seq: [N_unique, Seq, 1, H, W] 唯一时间窗口的 TEC 地图序列
+            tec_indices: [Batch] 每个样本对应的唯一时间窗口索引
 
         Returns:
             output: [Batch, 1] 预测 Ne (对数尺度)
@@ -236,21 +242,31 @@ class R_STMRF_Model(nn.Module):
         # 4. 时序掩码
         temporal_mask = self.create_temporal_mask(time)
 
-        # ==================== 分支 A: 空间分支 ====================
-        # A1. 生成空间基函数
+        # ==================== 分支 A: 空间分支（主路 + Context 调制）====================
+        # A1. 生成空间基函数（主建模网络）
         spatial_input = torch.stack([lat_n, lon_n, alt_n, sin_lt, cos_lt], dim=1)
         h_spatial = self.spatial_basis_net(spatial_input)  # [Batch, basis_dim]
+        # h_spatial 表示"在无时序约束下的电子密度空间基函数"
 
-        # A2. TEC 上下文编码（ConvLSTM）
-        F_tec = self.spatial_context_encoder(tec_map_seq)  # [Batch, tec_feat_dim, H, W]
+        # ==================== A2. TEC 区域级上下文编码（ConvLSTM - Batch-Free）====================
+        # 关键优化：ConvLSTM 只处理唯一的时间窗口，不随 batch_size 增长
+        # TEC 是区域级背景场（shared spatio-temporal context），被所有 query points 共享
+        F_tec_unique = self.spatial_context_encoder(unique_tec_map_seq)
+        # F_tec_unique: [N_unique, tec_feat_dim, H, W]
+        # 内存开销: N_unique * tec_feat_dim * H * W（与 batch_size 无关！）
 
-        # A3. 从 F_tec 中采样到查询点
+        # A3. 根据每个样本的时间索引，提取对应的 TEC 特征场
+        # 使用 indexing 而不是 repeat，避免内存复制
+        F_tec = F_tec_unique[tec_indices]  # [Batch, tec_feat_dim, H, W]
+        # 这里只是索引操作，不会复制底层数据
+
+        # A4. 从 2D 特征场中采样到查询点（双线性插值）
         # grid_sample 需要归一化坐标 [-1, 1]
         # Lat: -90~90 -> [-1, 1], Lon: -180~180 -> [-1, 1]
         grid_coords = torch.stack([lon_n, lat_n], dim=-1)  # [Batch, 2]
         grid_coords = grid_coords.view(batch_size, 1, 1, 2)  # [Batch, 1, 1, 2]
 
-        # grid_sample: [Batch, C, H, W] + [Batch, H_out, W_out, 2] -> [Batch, C, H_out, W_out]
+        # 双线性采样：从全局 2D 特征场提取查询点的局部特征
         z_tec = F.grid_sample(
             F_tec, grid_coords,
             mode='bilinear',
@@ -259,15 +275,20 @@ class R_STMRF_Model(nn.Module):
         )  # [Batch, tec_feat_dim, 1, 1]
 
         z_tec = z_tec.squeeze(-1).squeeze(-1)  # [Batch, tec_feat_dim]
+        # z_tec 表示"查询点处的 TEC 水平梯度演化特征"
 
-        # A4. 空间调制（FiLM: gamma * h + beta）
+        # A4. 空间调制（FiLM: γ ⊙ h + β）
         film_params = self.spatial_modulation_head(z_tec)  # [Batch, basis_dim * 2]
         gamma, beta = torch.chunk(film_params, 2, dim=-1)  # 各 [Batch, basis_dim]
 
-        # 约束 gamma 的范围（避免过度缩放）
-        gamma = torch.sigmoid(gamma)  # [0, 1] -> 可以映射到 [0.8, 1.2]
-        gamma = 0.8 + gamma * 0.4  # [0.8, 1.2]
+        # 约束 gamma 的范围（避免过度调制，保证物理合理性）
+        # gamma 控制水平梯度的强弱（扩散速度、增强/抑制）
+        gamma = torch.sigmoid(gamma)  # [0, 1]
+        gamma = 0.8 + gamma * 0.4  # [0.8, 1.2] - 限制调制幅度
 
+        # FiLM 调制：h'(x,t) = γ(m) ⊙ h(x) + β(m)
+        # gamma: 控制空间梯度强弱
+        # beta: 低频偏移（可选或弱化）
         h_spatial_mod = gamma * h_spatial + beta  # [Batch, basis_dim]
 
         # ==================== 分支 B: 时间分支 ====================
@@ -372,15 +393,21 @@ if __name__ == '__main__':
     coords[:, 3] = coords[:, 3].abs() * 100  # Time
 
     sw_seq = torch.randn(batch_size, 6, 2).to(device)  # [Batch, Seq=6, 2]
-    tec_map_seq = torch.rand(batch_size, 6, 1, 181, 361).to(device)  # [Batch, Seq, 1, H, W]
+
+    # 模拟唯一时间窗口（假设 batch 中有 3 个唯一时间窗口）
+    n_unique = 3
+    unique_tec_map_seq = torch.rand(n_unique, 6, 1, 181, 361).to(device)  # [N_unique, Seq, 1, H, W]
+    tec_indices = torch.randint(0, n_unique, (batch_size,)).to(device)  # [Batch]
 
     print("\n输入形状:")
     print(f"  coords: {coords.shape}")
     print(f"  sw_seq: {sw_seq.shape}")
-    print(f"  tec_map_seq: {tec_map_seq.shape}")
+    print(f"  unique_tec_map_seq: {unique_tec_map_seq.shape}")
+    print(f"  tec_indices: {tec_indices.shape}")
+    print(f"  唯一时间窗口数: {n_unique} (vs batch_size: {batch_size})")
 
     # 前向传播
-    output, log_var, correction, extras = model(coords, sw_seq, tec_map_seq)
+    output, log_var, correction, extras = model(coords, sw_seq, unique_tec_map_seq, tec_indices)
 
     print("\n输出形状:")
     print(f"  output: {output.shape}")
