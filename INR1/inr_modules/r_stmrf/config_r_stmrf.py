@@ -36,12 +36,14 @@ CONFIG_R_STMRF = {
     'omega_0': 30.0,  # SIREN 频率因子
 
     # ==================== 循环网络参数 ====================
-    # ConvLSTM (TEC 空间上下文编码器 - Context，非主建模网络)
+    # ConvLSTM (TEC 区域级上下文编码器 - Context，非主建模网络)
     # 职责: 提取 TEC 水平梯度演化模式，输出调制特征（不直接预测电子密度）
-    # 内存占用: batch_size * tec_feat_dim * tec_h * tec_w * 4 bytes
-    #   示例: 128 * 16 * 181 * 361 * 4 = ~534 MB (可接受)
-    #         1024 * 32 * 181 * 361 * 4 = ~8.5 GB (内存不足！)
-    'tec_feat_dim': 16,  # ConvLSTM 输出通道数（16-32，太大会内存不足）
+    # 关键优化: ConvLSTM 作用于区域级背景场，不随 batch_size 增长
+    # 内存占用: N_unique * tec_feat_dim * tec_h * tec_w * 4 bytes（与 batch_size 无关！）
+    #   示例: 假设 N_unique ≈ 10（时间分箱后的唯一时间窗口数）
+    #         10 * 32 * 181 * 361 * 4 = ~83 MB（可接受，即使 batch_size=2048）
+    #         32 * 32 * 181 * 361 * 4 = ~267 MB（即使有 32 个唯一时间窗口也可接受）
+    'tec_feat_dim': 32,  # ConvLSTM 输出通道数（恢复到 32，因为不随 batch_size 增长）
     'tec_h': 181,  # TEC 地图高度
     'tec_w': 361,  # TEC 地图宽度
     'convlstm_layers': 2,  # ConvLSTM 层数
@@ -53,7 +55,7 @@ CONFIG_R_STMRF = {
     'lstm_dropout': 0.1,  # LSTM Dropout
 
     # ==================== 训练超参数 ====================
-    'batch_size': 128,  # 批次大小（CPU 环境降低以避免内存不足）
+    'batch_size': 2048,  # 批次大小（ConvLSTM 不随 batch 增长，可使用大 batch）
     'lr': 3e-4,  # 学习率
     'weight_decay': 1e-4,  # 权重衰减
     'epochs': 50,  # 训练轮数

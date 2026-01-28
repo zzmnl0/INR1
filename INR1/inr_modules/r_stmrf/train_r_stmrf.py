@@ -15,7 +15,7 @@ import torch
 import torch.optim as optim
 import torch.nn.functional as F
 import numpy as np
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, random_split, Subset
 from tqdm import tqdm
 
 # 添加模块路径
@@ -30,7 +30,43 @@ from physics_losses_r_stmrf import combined_physics_loss
 from sliding_dataset import SlidingWindowBatchProcessor
 
 from data_managers import SpaceWeatherManager, TECDataManager, IRINeuralProxy
-from data_managers.FY_dataloader import FY3D_Dataset
+from data_managers.FY_dataloader import FY3D_Dataset, TimeBinSampler
+
+
+class SubsetTimeBinSampler(TimeBinSampler):
+    """
+    TimeBinSampler 的 Subset 版本
+
+    用于在 random_split 之后仍然使用时间分箱策略
+    """
+    def __init__(self, subset: Subset, batch_size: int, shuffle: bool = True, drop_last: bool = False):
+        # 获取底层的 FY3D_Dataset
+        base_dataset = subset.dataset
+        subset_indices = subset.indices
+
+        # 构建 Subset 的 indices_by_bin
+        # 只保留在 subset 中的索引
+        subset_indices_set = set(subset_indices)
+        filtered_indices_by_bin = {}
+
+        for bin_id, indices in base_dataset.indices_by_bin.items():
+            # 过滤出在 subset 中的索引
+            filtered_indices = np.array([idx for idx in indices if idx in subset_indices_set])
+            if len(filtered_indices) > 0:
+                filtered_indices_by_bin[bin_id] = filtered_indices
+
+        # 创建一个临时的 dataset 对象，只用于存储 indices_by_bin
+        class TempDataset:
+            def __init__(self, indices_by_bin):
+                self.indices_by_bin = indices_by_bin
+
+        temp_dataset = TempDataset(filtered_indices_by_bin)
+
+        # 调用父类初始化（但使用临时 dataset）
+        self.dataset = temp_dataset
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.drop_last = drop_last
 
 
 def train_one_epoch(model, train_loader, batch_processor, optimizer, device, config, epoch):
@@ -62,14 +98,14 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device, con
     pbar = tqdm(train_loader, desc=f"Epoch {epoch+1} [Train]", leave=False)
 
     for batch_idx, batch_data in enumerate(pbar):
-        # 1. 处理批次数据（获取序列）
-        coords, target_ne, sw_seq, tec_map_seq, target_tec_map = batch_processor.process_batch(batch_data)
+        # 1. 处理批次数据（获取序列，识别唯一时间窗口）
+        coords, target_ne, sw_seq, unique_tec_map_seq, tec_indices, target_tec_map = batch_processor.process_batch(batch_data)
 
         # 确保 coords 需要梯度（用于物理损失）
         coords.requires_grad_(True)
 
-        # 2. 前向传播
-        pred_ne, log_var, correction, extras = model(coords, sw_seq, tec_map_seq)
+        # 2. 前向传播（ConvLSTM 不随 batch_size 增长）
+        pred_ne, log_var, correction, extras = model(coords, sw_seq, unique_tec_map_seq, tec_indices)
 
         # 3. 计算主损失（MSE 或 Huber）
         if config['use_uncertainty']:
@@ -159,11 +195,11 @@ def validate(model, val_loader, batch_processor, device, config):
 
     with torch.no_grad():
         for batch_data in tqdm(val_loader, desc="Validating", leave=False):
-            # 处理批次
-            coords, target_ne, sw_seq, tec_map_seq, target_tec_map = batch_processor.process_batch(batch_data)
+            # 处理批次（识别唯一时间窗口）
+            coords, target_ne, sw_seq, unique_tec_map_seq, tec_indices, target_tec_map = batch_processor.process_batch(batch_data)
 
-            # 前向传播
-            pred_ne, log_var, correction, extras = model(coords, sw_seq, tec_map_seq)
+            # 前向传播（ConvLSTM 不随 batch_size 增长）
+            pred_ne, log_var, correction, extras = model(coords, sw_seq, unique_tec_map_seq, tec_indices)
 
             # MSE 损失
             loss_mse = F.mse_loss(pred_ne, target_ne)
@@ -275,24 +311,39 @@ def train_r_stmrf(config):
         full_dataset, [train_size, val_size], generator=generator
     )
 
-    # 创建 DataLoader
-    train_loader = DataLoader(
+    # 创建时间分箱 Sampler（优化 ConvLSTM 内存使用）
+    # 通过时间分箱，确保每个 batch 内的样本来自相似的时间窗口
+    # 这样可以最大化唯一时间窗口的重复率，减少 ConvLSTM 的重复计算
+    train_sampler = SubsetTimeBinSampler(
         train_dataset,
         batch_size=config['batch_size'],
         shuffle=True,
+        drop_last=False
+    )
+    val_sampler = SubsetTimeBinSampler(
+        val_dataset,
+        batch_size=config['batch_size'],
+        shuffle=False,
+        drop_last=False
+    )
+
+    # 创建 DataLoader（使用 batch_sampler）
+    train_loader = DataLoader(
+        train_dataset,
+        batch_sampler=train_sampler,
         num_workers=config['num_workers'],
         pin_memory=True if device.type == 'cuda' else False
     )
 
     val_loader = DataLoader(
         val_dataset,
-        batch_size=config['batch_size'],
-        shuffle=False,
+        batch_sampler=val_sampler,
         num_workers=config['num_workers'],
         pin_memory=True if device.type == 'cuda' else False
     )
 
     print(f"  训练批次: {len(train_loader)} | 验证批次: {len(val_loader)}")
+    print(f"  使用时间分箱策略优化 ConvLSTM 内存使用")
 
     # 创建批次处理器
     batch_processor = SlidingWindowBatchProcessor(sw_manager, tec_manager, device)

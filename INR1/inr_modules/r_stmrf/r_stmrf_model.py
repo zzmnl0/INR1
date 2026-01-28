@@ -208,14 +208,15 @@ class R_STMRF_Model(nn.Module):
         history_times = current_time_batch.unsqueeze(1) - offsets.unsqueeze(0)
         return history_times < 0
 
-    def forward(self, coords, sw_seq, tec_map_seq):
+    def forward(self, coords, sw_seq, unique_tec_map_seq, tec_indices):
         """
-        前向传播
+        前向传播（优化版：ConvLSTM 作用于区域级背景场，不依赖 batch 维度）
 
         Args:
             coords: [Batch, 4] (Lat, Lon, Alt, Time)
             sw_seq: [Batch, Seq, 2] 空间天气序列 (Kp, F10.7)
-            tec_map_seq: [Batch, Seq, 1, H, W] TEC 地图序列
+            unique_tec_map_seq: [N_unique, Seq, 1, H, W] 唯一时间窗口的 TEC 地图序列
+            tec_indices: [Batch] 每个样本对应的唯一时间窗口索引
 
         Returns:
             output: [Batch, 1] 预测 Ne (对数尺度)
@@ -247,12 +248,19 @@ class R_STMRF_Model(nn.Module):
         h_spatial = self.spatial_basis_net(spatial_input)  # [Batch, basis_dim]
         # h_spatial 表示"在无时序约束下的电子密度空间基函数"
 
-        # A2. TEC 上下文编码（ConvLSTM - Context Encoder）
-        # ConvLSTM 提取 TEC 的水平梯度演化模式，输出 2D 特征场
-        F_tec = self.spatial_context_encoder(tec_map_seq)  # [Batch, tec_feat_dim, H, W]
-        # F_tec 表示"TEC 的水平结构及其时序演化特征"
+        # ==================== A2. TEC 区域级上下文编码（ConvLSTM - Batch-Free）====================
+        # 关键优化：ConvLSTM 只处理唯一的时间窗口，不随 batch_size 增长
+        # TEC 是区域级背景场（shared spatio-temporal context），被所有 query points 共享
+        F_tec_unique = self.spatial_context_encoder(unique_tec_map_seq)
+        # F_tec_unique: [N_unique, tec_feat_dim, H, W]
+        # 内存开销: N_unique * tec_feat_dim * H * W（与 batch_size 无关！）
 
-        # A3. 从 2D 特征场中采样到查询点（双线性插值）
+        # A3. 根据每个样本的时间索引，提取对应的 TEC 特征场
+        # 使用 indexing 而不是 repeat，避免内存复制
+        F_tec = F_tec_unique[tec_indices]  # [Batch, tec_feat_dim, H, W]
+        # 这里只是索引操作，不会复制底层数据
+
+        # A4. 从 2D 特征场中采样到查询点（双线性插值）
         # grid_sample 需要归一化坐标 [-1, 1]
         # Lat: -90~90 -> [-1, 1], Lon: -180~180 -> [-1, 1]
         grid_coords = torch.stack([lon_n, lat_n], dim=-1)  # [Batch, 2]
@@ -385,15 +393,21 @@ if __name__ == '__main__':
     coords[:, 3] = coords[:, 3].abs() * 100  # Time
 
     sw_seq = torch.randn(batch_size, 6, 2).to(device)  # [Batch, Seq=6, 2]
-    tec_map_seq = torch.rand(batch_size, 6, 1, 181, 361).to(device)  # [Batch, Seq, 1, H, W]
+
+    # 模拟唯一时间窗口（假设 batch 中有 3 个唯一时间窗口）
+    n_unique = 3
+    unique_tec_map_seq = torch.rand(n_unique, 6, 1, 181, 361).to(device)  # [N_unique, Seq, 1, H, W]
+    tec_indices = torch.randint(0, n_unique, (batch_size,)).to(device)  # [Batch]
 
     print("\n输入形状:")
     print(f"  coords: {coords.shape}")
     print(f"  sw_seq: {sw_seq.shape}")
-    print(f"  tec_map_seq: {tec_map_seq.shape}")
+    print(f"  unique_tec_map_seq: {unique_tec_map_seq.shape}")
+    print(f"  tec_indices: {tec_indices.shape}")
+    print(f"  唯一时间窗口数: {n_unique} (vs batch_size: {batch_size})")
 
     # 前向传播
-    output, log_var, correction, extras = model(coords, sw_seq, tec_map_seq)
+    output, log_var, correction, extras = model(coords, sw_seq, unique_tec_map_seq, tec_indices)
 
     print("\n输出形状:")
     print(f"  output: {output.shape}")
