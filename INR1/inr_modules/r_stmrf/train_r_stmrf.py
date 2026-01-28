@@ -15,6 +15,7 @@ import torch
 import torch.optim as optim
 import torch.nn.functional as F
 import numpy as np
+from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
 
 # 添加模块路径
@@ -29,7 +30,7 @@ from physics_losses_r_stmrf import combined_physics_loss
 from sliding_dataset import SlidingWindowBatchProcessor
 
 from data_managers import SpaceWeatherManager, TECDataManager, IRINeuralProxy
-from data_managers.FY_dataloader import get_dataloaders
+from data_managers.FY_dataloader import FY3D_Dataset
 
 
 def train_one_epoch(model, train_loader, batch_processor, optimizer, device, config, epoch):
@@ -250,19 +251,48 @@ def train_r_stmrf(config):
     iri_proxy.eval()
     print("  ✓ IRI 代理已加载并冻结")
 
-    # ==================== 3. 准备数据集 ====================
-    print("\n[步骤 3] 准备数据集...")
+    # ==================== 3. 准备数据集（随机划分）====================
+    print("\n[步骤 3] 准备数据集（随机划分）...")
 
-    train_loader, val_loader = get_dataloaders(
+    # 加载全部数据
+    full_dataset = FY3D_Dataset(
         npy_path=config['fy_path'],
-        val_days=config['val_days'],
-        batch_size=config['batch_size'],
-        bin_size_hours=config['bin_size_hours'],
-        num_workers=config['num_workers']
+        mode='train',
+        val_days=[],  # 不使用日期过滤，加载全部数据
+        bin_size_hours=config['bin_size_hours']
     )
 
-    print(f"  训练批次: {len(train_loader)}")
-    print(f"  验证批次: {len(val_loader)}")
+    # 随机划分
+    total_samples = len(full_dataset)
+    val_size = int(total_samples * config['val_ratio'])
+    train_size = total_samples - val_size
+
+    print(f"  总样本: {total_samples}")
+    print(f"  训练集: {train_size} | 验证集: {val_size}")
+
+    generator = torch.Generator().manual_seed(config['seed'])
+    train_dataset, val_dataset = random_split(
+        full_dataset, [train_size, val_size], generator=generator
+    )
+
+    # 创建 DataLoader
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config['batch_size'],
+        shuffle=True,
+        num_workers=config['num_workers'],
+        pin_memory=True if device.type == 'cuda' else False
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=config['batch_size'],
+        shuffle=False,
+        num_workers=config['num_workers'],
+        pin_memory=True if device.type == 'cuda' else False
+    )
+
+    print(f"  训练批次: {len(train_loader)} | 验证批次: {len(val_loader)}")
 
     # 创建批次处理器
     batch_processor = SlidingWindowBatchProcessor(sw_manager, tec_manager, device)
