@@ -77,9 +77,10 @@ class R_STMRF_Model(nn.Module):
         # 环境特征维度
         self.env_hidden_dim = config.get('env_hidden_dim', 64)
 
-        # ==================== 分支 A: 空间分支 ====================
-        # 空间基函数网络 (SIREN)
+        # ==================== 分支 A: 空间分支（主路）====================
+        # 空间基函数网络 (SIREN) - 主建模网络
         # 输入: (Lat, Lon, Alt, sin_lt, cos_lt) = 5维
+        # 职责: 学习电子密度的空间表达能力（无时序约束）
         self.spatial_basis_net = ModulatedSIRENNet(
             in_features=5,
             hidden_features=self.siren_hidden,
@@ -88,7 +89,9 @@ class R_STMRF_Model(nn.Module):
             omega_0=self.omega_0
         )
 
-        # 空间上下文编码器 (ConvLSTM)
+        # 空间上下文编码器 (ConvLSTM) - Context，非主建模网络
+        # 职责: 提取 TEC 的水平梯度分布及其时序演化模式
+        # 输出: 2D 特征场 M(t, lat, lon)，用于调制空间基函数
         self.spatial_context_encoder = SpatialContextEncoder(
             input_dim=1,
             hidden_dim=self.tec_feat_dim,
@@ -97,7 +100,9 @@ class R_STMRF_Model(nn.Module):
         )
 
         # 空间调制头（FiLM: gamma * h + beta）
-        # 将采样后的 TEC 特征映射为调制参数
+        # 职责: 将 TEC 特征映射为调制参数
+        # gamma: 控制水平梯度强弱（梯度扩散/增强/抑制）
+        # beta: 低频偏移项（可弱化）
         self.spatial_modulation_head = nn.Sequential(
             nn.Linear(self.tec_feat_dim, self.basis_dim * 2),
             nn.Tanh()
@@ -236,21 +241,24 @@ class R_STMRF_Model(nn.Module):
         # 4. 时序掩码
         temporal_mask = self.create_temporal_mask(time)
 
-        # ==================== 分支 A: 空间分支 ====================
-        # A1. 生成空间基函数
+        # ==================== 分支 A: 空间分支（主路 + Context 调制）====================
+        # A1. 生成空间基函数（主建模网络）
         spatial_input = torch.stack([lat_n, lon_n, alt_n, sin_lt, cos_lt], dim=1)
         h_spatial = self.spatial_basis_net(spatial_input)  # [Batch, basis_dim]
+        # h_spatial 表示"在无时序约束下的电子密度空间基函数"
 
-        # A2. TEC 上下文编码（ConvLSTM）
+        # A2. TEC 上下文编码（ConvLSTM - Context Encoder）
+        # ConvLSTM 提取 TEC 的水平梯度演化模式，输出 2D 特征场
         F_tec = self.spatial_context_encoder(tec_map_seq)  # [Batch, tec_feat_dim, H, W]
+        # F_tec 表示"TEC 的水平结构及其时序演化特征"
 
-        # A3. 从 F_tec 中采样到查询点
+        # A3. 从 2D 特征场中采样到查询点（双线性插值）
         # grid_sample 需要归一化坐标 [-1, 1]
         # Lat: -90~90 -> [-1, 1], Lon: -180~180 -> [-1, 1]
         grid_coords = torch.stack([lon_n, lat_n], dim=-1)  # [Batch, 2]
         grid_coords = grid_coords.view(batch_size, 1, 1, 2)  # [Batch, 1, 1, 2]
 
-        # grid_sample: [Batch, C, H, W] + [Batch, H_out, W_out, 2] -> [Batch, C, H_out, W_out]
+        # 双线性采样：从全局 2D 特征场提取查询点的局部特征
         z_tec = F.grid_sample(
             F_tec, grid_coords,
             mode='bilinear',
@@ -259,15 +267,20 @@ class R_STMRF_Model(nn.Module):
         )  # [Batch, tec_feat_dim, 1, 1]
 
         z_tec = z_tec.squeeze(-1).squeeze(-1)  # [Batch, tec_feat_dim]
+        # z_tec 表示"查询点处的 TEC 水平梯度演化特征"
 
-        # A4. 空间调制（FiLM: gamma * h + beta）
+        # A4. 空间调制（FiLM: γ ⊙ h + β）
         film_params = self.spatial_modulation_head(z_tec)  # [Batch, basis_dim * 2]
         gamma, beta = torch.chunk(film_params, 2, dim=-1)  # 各 [Batch, basis_dim]
 
-        # 约束 gamma 的范围（避免过度缩放）
-        gamma = torch.sigmoid(gamma)  # [0, 1] -> 可以映射到 [0.8, 1.2]
-        gamma = 0.8 + gamma * 0.4  # [0.8, 1.2]
+        # 约束 gamma 的范围（避免过度调制，保证物理合理性）
+        # gamma 控制水平梯度的强弱（扩散速度、增强/抑制）
+        gamma = torch.sigmoid(gamma)  # [0, 1]
+        gamma = 0.8 + gamma * 0.4  # [0.8, 1.2] - 限制调制幅度
 
+        # FiLM 调制：h'(x,t) = γ(m) ⊙ h(x) + β(m)
+        # gamma: 控制空间梯度强弱
+        # beta: 低频偏移（可选或弱化）
         h_spatial_mod = gamma * h_spatial + beta  # [Batch, basis_dim]
 
         # ==================== 分支 B: 时间分支 ====================
