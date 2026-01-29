@@ -36,17 +36,23 @@ CONFIG_R_STMRF = {
     'omega_0': 30.0,  # SIREN 频率因子
 
     # ==================== 循环网络参数 ====================
-    # ConvLSTM (TEC 区域级上下文编码器 - Context，非主建模网络)
-    # 职责: 提取 TEC 水平梯度演化模式，输出调制特征（不直接预测电子密度）
-    # 关键优化: ConvLSTM 作用于区域级背景场，不随 batch_size 增长
+    # ConvLSTM (TEC 区域级上下文编码器 - 梯度方向约束源，非数值调制)
+    # 新设计: TEC 仅作为"时序水平梯度方向约束"，不直接调制电子密度
+    # 职责: 提取 TEC 水平梯度方向的时序演化特征 F_TEC
+    # 作用: 通过梯度方向一致性损失约束 Ne_fused，不参与数值预测
+    #
+    # 内存优化:
+    # 1. TEC 地图降采样 4x: 181×361 → 46×91（减少 16x 内存）
+    # 2. ConvLSTM 作用于区域级背景场，不随 batch_size 增长
     # 内存占用: N_unique * tec_feat_dim * tec_h * tec_w * 4 bytes（与 batch_size 无关！）
-    #   示例: 假设 N_unique ≈ 10（时间分箱后的唯一时间窗口数）
-    #         10 * 32 * 181 * 361 * 4 = ~83 MB（可接受，即使 batch_size=2048）
-    #         32 * 32 * 181 * 361 * 4 = ~267 MB（即使有 32 个唯一时间窗口也可接受）
-    'tec_feat_dim': 32,  # ConvLSTM 输出通道数（恢复到 32，因为不随 batch_size 增长）
-    'tec_h': 181,  # TEC 地图高度
-    'tec_w': 361,  # TEC 地图宽度
-    'convlstm_layers': 2,  # ConvLSTM 层数
+    #   示例: 降采样后 46×91
+    #         10 * 16 * 46 * 91 * 4 = ~2.7 MB（极小，即使 N_unique=100 也只需 27 MB）
+    #         100 * 16 * 46 * 91 * 4 = ~27 MB（可接受，batch_size=2048 无压力）
+    'tec_downsample_factor': 4,  # TEC 地图降采样因子（181×361 → 46×91）
+    'tec_feat_dim': 16,  # ConvLSTM 输出通道数（梯度方向特征，无需太大）
+    'tec_h': 46,  # TEC 地图高度（降采样后）
+    'tec_w': 91,  # TEC 地图宽度（降采样后）
+    'convlstm_layers': 1,  # ConvLSTM 层数（简化，只需提取低频梯度方向）
     'convlstm_kernel': 3,  # ConvLSTM 卷积核大小
 
     # LSTM (全局环境编码器)
@@ -76,14 +82,15 @@ CONFIG_R_STMRF = {
     # 主损失
     'w_mse': 1.0,  # MSE 损失权重（或 Huber Loss）
 
-    # 物理约束损失
+    # 物理约束损失（新设计）
     'w_chapman': 0.1,  # Chapman 垂直平滑损失权重
-    'w_tec_align': 0.05,  # TEC 梯度对齐损失权重
-    'w_smooth': 0.05,  # 额外的平滑约束（可选）
+    'w_tec_direction': 0.03,  # TEC 梯度方向一致性权重（新设计 - 取较小值避免过约束）
 
-    # IRI 约束（可选）
-    'w_iri_dir': 0.0,  # IRI 梯度方向一致性（设为 0 表示不使用）
-    'w_bkg_val': 0.01,  # 背景值正则化
+    # 已弃用的损失（兼容性保留）
+    'w_tec_align': 0.0,  # 旧的 TEC 梯度对齐损失（已弃用，设为 0）
+    'w_smooth': 0.0,  # 额外的平滑约束（已弃用）
+    'w_iri_dir': 0.0,  # IRI 梯度方向一致性（已弃用）
+    'w_bkg_val': 0.0,  # 背景值正则化（已弃用）
 
     # ==================== 不确定性学习 ====================
     'use_uncertainty': True,  # 是否启用异方差损失

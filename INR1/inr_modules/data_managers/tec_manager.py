@@ -11,37 +11,42 @@ import os
 class TECDataManager:
     """
     TEC数据管理器
-    
+
     功能:
     - 加载并上采样TEC地图数据
     - 提供时序窗口采样
     - 支持双线性插值
+
+    内存优化: 使用降采样的 TEC 地图以减少 ConvLSTM 内存开销
     """
-    
-    def __init__(self, tec_map_path, total_hours, seq_len=12, device='cuda'):
+
+    def __init__(self, tec_map_path, total_hours, seq_len=12, device='cuda', downsample_factor=4):
         """
         Args:
             tec_map_path: TEC数据文件路径
             total_hours: 总时长（小时）
             seq_len: 时序窗口长度
             device: 计算设备
+            downsample_factor: 降采样因子（用于减少内存）
         """
         print(f"[TECDataManager] 加载数据...")
-        
+
         if not os.path.exists(tec_map_path):
             raise FileNotFoundError(f"TEC文件未找到: {tec_map_path}")
-        
+
         self.device = device
         self.total_hours = float(total_hours)
         self.seq_len = int(seq_len)
-        
+        self.downsample_factor = downsample_factor
+
         # 加载原始数据 [Time, Lat, Lon]
         raw_data = np.load(tec_map_path).astype(np.float32)
         tec_tensor = torch.from_numpy(raw_data).unsqueeze(1)  # [Time, 1, Lat, Lon]
-        
-        # 纬度填充与上采样
+
+        # 纬度填充与降采样（内存优化）
         pad_tensor = F.pad(tec_tensor, (0, 0, 1, 1), mode='replicate')
-        self.target_h, self.target_w = 181, 361
+        # 原始: 181×361, 降采样4x: 46×91
+        self.target_h, self.target_w = 181 // downsample_factor + 1, 361 // downsample_factor + 1
         
         upsampled_tensor = F.interpolate(
             pad_tensor, 

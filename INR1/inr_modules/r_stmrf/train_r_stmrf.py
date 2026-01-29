@@ -92,7 +92,7 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device, con
     total_mse = 0.0
     total_physics = 0.0
     total_chapman = 0.0
-    total_tec_align = 0.0
+    total_tec_direction = 0.0
     num_batches = 0
 
     pbar = tqdm(train_loader, desc=f"Epoch {epoch+1} [Train]", leave=False)
@@ -117,13 +117,16 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device, con
             # 简单 MSE
             loss_main = F.mse_loss(pred_ne, target_ne)
 
-        # 4. 计算物理约束损失
+        # 4. 计算物理约束损失（新设计：使用梯度方向一致性）
         loss_physics, physics_dict = combined_physics_loss(
             pred_ne=pred_ne,
             coords=coords,
-            target_tec_map=target_tec_map,
+            tec_grad_direction=extras.get('tec_grad_direction'),  # 新设计
+            coords_normalized=extras.get('coords_normalized'),  # 新设计
             w_chapman=config['w_chapman'],
-            w_tec_align=config['w_tec_align'],
+            w_tec_direction=config.get('w_tec_direction', 0.05),  # 新设计 - 梯度方向权重
+            target_tec_map=target_tec_map,  # 兼容旧设计
+            w_tec_align=config.get('w_tec_align', 0.0),  # 旧设计已弃用，设为 0
             tec_lat_range=config['lat_range'],
             tec_lon_range=config['lon_range']
         )
@@ -146,7 +149,7 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device, con
         total_mse += loss_main.item()
         total_physics += physics_dict['physics_total']
         total_chapman += physics_dict['chapman']
-        total_tec_align += physics_dict['tec_align']
+        total_tec_direction += physics_dict.get('tec_direction', 0.0)
         num_batches += 1
 
         # 更新进度条
@@ -163,7 +166,7 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device, con
         'mse': total_mse / num_batches,
         'physics': total_physics / num_batches,
         'chapman': total_chapman / num_batches,
-        'tec_align': total_tec_align / num_batches
+        'tec_direction': total_tec_direction / num_batches
     }
 
     return avg_loss, loss_dict
@@ -272,7 +275,8 @@ def train_r_stmrf(config):
         tec_map_path=config['tec_path'],
         total_hours=config['total_hours'],
         seq_len=config['seq_len'],
-        device=device
+        device=device,
+        downsample_factor=config.get('tec_downsample_factor', 4)  # 降采样以减少内存
     )
 
     # ==================== 2. 加载 IRI 神经代理 ====================
@@ -413,7 +417,7 @@ def train_r_stmrf(config):
         print(f"    - MSE: {train_dict['mse']:.6f}")
         print(f"    - Physics: {train_dict['physics']:.6f}")
         print(f"      · Chapman: {train_dict['chapman']:.6f}")
-        print(f"      · TEC Align: {train_dict['tec_align']:.6f}")
+        print(f"      · TEC Direction: {train_dict['tec_direction']:.6f}")
         print(f"  验证损失: {val_loss:.6f}")
         print(f"    - MAE: {val_metrics['mae']:.6f}")
         print(f"    - RMSE: {val_metrics['rmse']:.6f}")
