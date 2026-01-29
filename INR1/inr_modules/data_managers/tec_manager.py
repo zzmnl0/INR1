@@ -13,21 +13,24 @@ class TECDataManager:
     TEC数据管理器
 
     功能:
-    - 加载并上采样TEC地图数据
+    - 加载TEC地图数据（保持原始分辨率）
     - 提供时序窗口采样
     - 支持双线性插值
 
-    内存优化: 使用降采样的 TEC 地图以减少 ConvLSTM 内存开销
+    数据规格:
+    - 原始: (720, 71, 73) - Time × Lat × Lon
+    - Lat: -87.5 ~ 87.5, 步长 2.5° (71个点)
+    - Lon: -180 ~ 180, 步长 5° (73个点)
+    - 纬度填充后: (720, 73, 73) - 填充到 -90 ~ 90
     """
 
-    def __init__(self, tec_map_path, total_hours, seq_len=12, device='cuda', downsample_factor=4):
+    def __init__(self, tec_map_path, total_hours, seq_len=12, device='cuda'):
         """
         Args:
             tec_map_path: TEC数据文件路径
             total_hours: 总时长（小时）
             seq_len: 时序窗口长度
             device: 计算设备
-            downsample_factor: 降采样因子（用于减少内存）
         """
         print(f"[TECDataManager] 加载数据...")
 
@@ -37,33 +40,35 @@ class TECDataManager:
         self.device = device
         self.total_hours = float(total_hours)
         self.seq_len = int(seq_len)
-        self.downsample_factor = downsample_factor
 
         # 加载原始数据 [Time, Lat, Lon]
+        # 预期形状: (720, 71, 73)
         raw_data = np.load(tec_map_path).astype(np.float32)
+        print(f"  原始TEC数据形状: {raw_data.shape}")
+
         tec_tensor = torch.from_numpy(raw_data).unsqueeze(1)  # [Time, 1, Lat, Lon]
 
-        # 纬度填充与降采样（内存优化）
+        # 仅纬度填充（保持原始分辨率，不做上采样/降采样）
+        # 原始: 71个纬度点 (-87.5 ~ 87.5)
+        # 填充: 前后各填充1个点，覆盖 -90 ~ 90
+        # 结果: 73个纬度点
         pad_tensor = F.pad(tec_tensor, (0, 0, 1, 1), mode='replicate')
-        # 原始: 181×361, 降采样4x: 46×91
-        self.target_h, self.target_w = 181 // downsample_factor + 1, 361 // downsample_factor + 1
-        
-        upsampled_tensor = F.interpolate(
-            pad_tensor, 
-            size=(self.target_h, self.target_w),
-            mode='bilinear', 
-            align_corners=True
-        )
-        
+        # pad_tensor: [Time, 1, 73, 73]
+
+        # 保持原始分辨率：73×73
+        self.target_h = 73  # 纬度点数（填充后）
+        self.target_w = 73  # 经度点数（原始）
+
         # 转换为3D体积 [1, 1, Time, Lat, Lon]
-        self.tec_vol = upsampled_tensor.permute(1, 0, 2, 3).unsqueeze(0).contiguous().to(device)
-        
+        self.tec_vol = pad_tensor.permute(1, 0, 2, 3).unsqueeze(0).contiguous().to(device)
+
         # 归一化统计
         self.min_tec = torch.min(self.tec_vol)
         self.max_tec = torch.max(self.tec_vol)
         self.denom = self.max_tec - self.min_tec + 1e-6
-        
+
         print(f"  TEC管理器就绪. 形状: {self.tec_vol.shape}")
+        print(f"  分辨率: Lat={self.target_h}, Lon={self.target_w}")
         print(f"  归一化范围: Min={self.min_tec:.2f}, Max={self.max_tec:.2f}")
     
     def get_tec_sequence(self, lat, lon, time_end):

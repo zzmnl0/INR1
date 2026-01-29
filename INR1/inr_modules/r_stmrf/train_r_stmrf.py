@@ -275,8 +275,8 @@ def train_r_stmrf(config):
         tec_map_path=config['tec_path'],
         total_hours=config['total_hours'],
         seq_len=config['seq_len'],
-        device=device,
-        downsample_factor=config.get('tec_downsample_factor', 4)  # 降采样以减少内存
+        device=device
+        # 保持原始分辨率73×73，不再使用降采样
     )
 
     # ==================== 2. 加载 IRI 神经代理 ====================

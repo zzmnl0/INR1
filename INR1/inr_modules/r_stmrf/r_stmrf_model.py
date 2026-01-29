@@ -399,7 +399,7 @@ if __name__ == '__main__':
 
     # 模拟唯一时间窗口（假设 batch 中有 3 个唯一时间窗口）
     n_unique = 3
-    unique_tec_map_seq = torch.rand(n_unique, 6, 1, 181, 361).to(device)  # [N_unique, Seq, 1, H, W]
+    unique_tec_map_seq = torch.rand(n_unique, 6, 1, 73, 73).to(device)  # [N_unique, Seq, 1, H, W]
     tec_indices = torch.randint(0, n_unique, (batch_size,)).to(device)  # [Batch]
 
     print("\n输入形状:")
