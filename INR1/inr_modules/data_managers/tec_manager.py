@@ -160,3 +160,56 @@ class TECDataManager:
         tec_maps_norm = torch.clamp(tec_maps_norm, 0.0, 1.0)
 
         return tec_maps_norm
+
+    def get_tec_map_sequence_by_hours(self, hour_indices):
+        """
+        获取指定整点小时的 TEC 地图序列（用于 HourlyTECContextCache）
+
+        此方法专为多时间尺度架构设计：ConvLSTM 只在 1h 整点运行，
+        输出低频、平滑的空间调制特征，不参与分钟级建模。
+
+        Args:
+            hour_indices: list or tensor of integer hour indices [0, 720)
+                         例如: [10, 11, 15] 表示 10h, 11h, 15h 三个整点
+
+        Returns:
+            tec_sequences: [N_hours, Seq_Len, 1, H, W] TEC 地图序列（归一化）
+                          每个序列: [hour-seq_len+1, ..., hour]
+        """
+        # 转换为 tensor
+        if isinstance(hour_indices, list):
+            hour_indices = torch.tensor(hour_indices, dtype=torch.long, device=self.device)
+        elif isinstance(hour_indices, torch.Tensor):
+            hour_indices = hour_indices.long().to(self.device)
+        else:
+            raise TypeError(f"hour_indices 必须是 list 或 tensor，当前类型: {type(hour_indices)}")
+
+        n_hours = hour_indices.shape[0]
+
+        # 生成时间序列: [h - seq_len + 1, ..., h]
+        offsets = torch.arange(self.seq_len, device=self.device).flip(0)  # [Seq]
+        time_seq = hour_indices.unsqueeze(1) - offsets.unsqueeze(0)  # [N_hours, Seq]
+
+        # 限制在有效范围内
+        time_seq = time_seq.clamp(0, int(self.total_hours) - 1)  # [N_hours, Seq]
+
+        # 从 tec_vol [1, 1, Time, Lat, Lon] 中提取地图
+        tec_data = self.tec_vol.squeeze(0).squeeze(0)  # [Time, Lat, Lon]
+
+        # 展平索引以便批量提取
+        flat_indices = time_seq.view(-1)  # [N_hours * Seq]
+
+        # 批量索引：[N_hours*Seq, Lat, Lon]
+        flat_maps = tec_data[flat_indices]
+
+        # 重塑为 [N_hours, Seq, Lat, Lon]
+        tec_maps = flat_maps.view(n_hours, self.seq_len, self.target_h, self.target_w)
+
+        # 添加通道维度：[N_hours, Seq, 1, Lat, Lon]
+        tec_maps = tec_maps.unsqueeze(2)
+
+        # 归一化到 [0, 1]
+        tec_maps_norm = (tec_maps - self.min_tec) / self.denom
+        tec_maps_norm = torch.clamp(tec_maps_norm, 0.0, 1.0)
+
+        return tec_maps_norm

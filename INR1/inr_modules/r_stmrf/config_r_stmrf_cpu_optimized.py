@@ -103,6 +103,10 @@ CONFIG_R_STMRF_CPU_OPTIMIZED = {
 
     # ==================== TEC 梯度对齐参数 ====================
     'tec_gradient_threshold_percentile': 50.0,
+
+    # ==================== 多时间尺度优化（CPU推荐启用）====================
+    'use_tec_cache': True,  # 启用小时级TEC缓存（减少ConvLSTM计算次数）
+    'tec_cache_size': 50,  # CPU环境使用较小的缓存
 }
 
 
