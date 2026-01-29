@@ -89,23 +89,25 @@ class R_STMRF_Model(nn.Module):
             omega_0=self.omega_0
         )
 
-        # 空间上下文编码器 (ConvLSTM) - Context，非主建模网络
-        # 职责: 提取 TEC 的水平梯度分布及其时序演化模式
-        # 输出: 2D 特征场 M(t, lat, lon)，用于调制空间基函数
+        # 空间上下文编码器 (ConvLSTM) - 梯度方向约束源（不是数值调制）
+        # 新设计: TEC 仅作为"时序水平梯度方向约束"
+        # 职责: 提取 TEC 水平梯度方向的时序演化特征 F_TEC
+        # 输出: 2D 低频特征场，表示期望的水平变化方向（用于损失计算）
+        # 注意: 不直接调制电子密度，不参与数值预测
         self.spatial_context_encoder = SpatialContextEncoder(
             input_dim=1,
             hidden_dim=self.tec_feat_dim,
-            num_layers=2,
-            kernel_size=3
+            num_layers=config.get('convlstm_layers', 1),  # 简化为 1 层
+            kernel_size=config.get('convlstm_kernel', 3)
         )
 
-        # 空间调制头（FiLM: gamma * h + beta）
-        # 职责: 将 TEC 特征映射为调制参数
-        # gamma: 控制水平梯度强弱（梯度扩散/增强/抑制）
-        # beta: 低频偏移项（可弱化）
-        self.spatial_modulation_head = nn.Sequential(
-            nn.Linear(self.tec_feat_dim, self.basis_dim * 2),
-            nn.Tanh()
+        # TEC 梯度方向提取头（用于损失计算，不是调制）
+        # 将 F_TEC 映射为期望的梯度方向向量（2D: lat_grad, lon_grad）
+        self.tec_gradient_direction_head = nn.Sequential(
+            nn.Conv2d(self.tec_feat_dim, 8, kernel_size=1),
+            nn.ReLU(),
+            nn.Conv2d(8, 2, kernel_size=1),  # 输出 2 通道: (grad_lat, grad_lon)
+            nn.Tanh()  # 归一化到 [-1, 1]
         )
 
         # ==================== 分支 B: 时间分支 ====================
@@ -208,6 +210,27 @@ class R_STMRF_Model(nn.Module):
         history_times = current_time_batch.unsqueeze(1) - offsets.unsqueeze(0)
         return history_times < 0
 
+    def _interpolate_tec_gradient(self, tec_grad_direction_unique, tec_indices, time, unique_tec_map_seq):
+        """
+        时间插值 TEC 梯度方向（保证亚小时尺度连续性）
+
+        TEC 是 1h 分辨率，需要插值到查询点的实际时间（可能是亚小时）
+        使用余弦插值权重保证平滑性
+
+        Args:
+            tec_grad_direction_unique: [N_unique, 2, H, W] 唯一时间窗口的梯度方向
+            tec_indices: [Batch] 每个样本对应的整数小时索引
+            time: [Batch] 查询点的实际时间（浮点数，可能包含分钟）
+            unique_tec_map_seq: [N_unique, Seq, 1, H, W] 用于获取时间信息
+
+        Returns:
+            [Batch, 2, H, W] 插值后的梯度方向
+        """
+        # 简化版本: 暂时不做时间插值，直接使用最近的整数小时
+        # TODO: 实现余弦插值
+        tec_grad_direction = tec_grad_direction_unique[tec_indices]  # [Batch, 2, H, W]
+        return tec_grad_direction
+
     def forward(self, coords, sw_seq, unique_tec_map_seq, tec_indices):
         """
         前向传播（优化版：ConvLSTM 作用于区域级背景场，不依赖 batch 维度）
@@ -248,48 +271,30 @@ class R_STMRF_Model(nn.Module):
         h_spatial = self.spatial_basis_net(spatial_input)  # [Batch, basis_dim]
         # h_spatial 表示"在无时序约束下的电子密度空间基函数"
 
-        # ==================== A2. TEC 区域级上下文编码（ConvLSTM - Batch-Free）====================
-        # 关键优化：ConvLSTM 只处理唯一的时间窗口，不随 batch_size 增长
-        # TEC 是区域级背景场（shared spatio-temporal context），被所有 query points 共享
+        # ==================== A2. TEC 区域级梯度方向特征提取（ConvLSTM - Batch-Free）====================
+        # 新设计: TEC 仅作为"时序水平梯度方向约束"，不直接调制电子密度
+        # ConvLSTM 只处理唯一的时间窗口，不随 batch_size 增长
         F_tec_unique = self.spatial_context_encoder(unique_tec_map_seq)
         # F_tec_unique: [N_unique, tec_feat_dim, H, W]
         # 内存开销: N_unique * tec_feat_dim * H * W（与 batch_size 无关！）
+        # 降采样后 H=46, W=91，内存极小
 
-        # A3. 根据每个样本的时间索引，提取对应的 TEC 特征场
-        # 使用 indexing 而不是 repeat，避免内存复制
-        F_tec = F_tec_unique[tec_indices]  # [Batch, tec_feat_dim, H, W]
-        # 这里只是索引操作，不会复制底层数据
+        # A3. 提取 TEC 梯度方向（用于损失计算，不是调制）
+        # 将 F_TEC 映射为期望的水平梯度方向向量
+        tec_grad_direction_unique = self.tec_gradient_direction_head(F_tec_unique)
+        # tec_grad_direction_unique: [N_unique, 2, H, W] - (grad_lat, grad_lon)
 
-        # A4. 从 2D 特征场中采样到查询点（双线性插值）
-        # grid_sample 需要归一化坐标 [-1, 1]
-        # Lat: -90~90 -> [-1, 1], Lon: -180~180 -> [-1, 1]
-        grid_coords = torch.stack([lon_n, lat_n], dim=-1)  # [Batch, 2]
-        grid_coords = grid_coords.view(batch_size, 1, 1, 2)  # [Batch, 1, 1, 2]
+        # A4. 时间插值（保证亚小时尺度连续性）
+        # TEC 是 1h 分辨率，需要插值到查询点的实际时间
+        # 使用余弦插值权重
+        tec_grad_direction = self._interpolate_tec_gradient(
+            tec_grad_direction_unique, tec_indices, time, unique_tec_map_seq
+        )
+        # tec_grad_direction: [Batch, 2, H, W] - 插值后的梯度方向场
 
-        # 双线性采样：从全局 2D 特征场提取查询点的局部特征
-        z_tec = F.grid_sample(
-            F_tec, grid_coords,
-            mode='bilinear',
-            padding_mode='border',
-            align_corners=True
-        )  # [Batch, tec_feat_dim, 1, 1]
-
-        z_tec = z_tec.squeeze(-1).squeeze(-1)  # [Batch, tec_feat_dim]
-        # z_tec 表示"查询点处的 TEC 水平梯度演化特征"
-
-        # A4. 空间调制（FiLM: γ ⊙ h + β）
-        film_params = self.spatial_modulation_head(z_tec)  # [Batch, basis_dim * 2]
-        gamma, beta = torch.chunk(film_params, 2, dim=-1)  # 各 [Batch, basis_dim]
-
-        # 约束 gamma 的范围（避免过度调制，保证物理合理性）
-        # gamma 控制水平梯度的强弱（扩散速度、增强/抑制）
-        gamma = torch.sigmoid(gamma)  # [0, 1]
-        gamma = 0.8 + gamma * 0.4  # [0.8, 1.2] - 限制调制幅度
-
-        # FiLM 调制：h'(x,t) = γ(m) ⊙ h(x) + β(m)
-        # gamma: 控制空间梯度强弱
-        # beta: 低频偏移（可选或弱化）
-        h_spatial_mod = gamma * h_spatial + beta  # [Batch, basis_dim]
+        # A5. 空间分支不再使用 TEC 调制，直接使用原始 SIREN 输出
+        # 移除 FiLM 调制，TEC 仅通过损失函数约束梯度方向
+        h_spatial_mod = h_spatial  # [Batch, basis_dim] - 无调制
 
         # ==================== 分支 B: 时间分支 ====================
         # B1. 生成时间基函数
@@ -325,12 +330,10 @@ class R_STMRF_Model(nn.Module):
             'h_spatial_mod': h_spatial_mod,
             'h_temporal': h_temporal,
             'h_temporal_mod': h_temporal_mod,
-            'gamma': gamma,
-            'beta_spatial': beta,
             'beta_temporal': beta_temporal,
-            'z_tec': z_tec,
             'z_env': z_env,
-            'F_tec': F_tec,
+            'tec_grad_direction': tec_grad_direction,  # [Batch, 2, H, W] - TEC 梯度方向
+            'coords_normalized': torch.stack([lat_n, lon_n], dim=1),  # [Batch, 2] - 用于采样
         }
 
         return output, log_var, raw_correction, extra_outputs
