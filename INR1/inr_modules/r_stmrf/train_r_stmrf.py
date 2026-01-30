@@ -69,7 +69,7 @@ class SubsetTimeBinSampler(TimeBinSampler):
         self.drop_last = drop_last
 
 
-def train_one_epoch(model, train_loader, batch_processor, optimizer, device, config, epoch, use_tec_cache=False):
+def train_one_epoch(model, train_loader, batch_processor, optimizer, device, config, epoch, use_tec_cache=False, scaler=None):
     """
     训练一个 epoch
 
@@ -82,6 +82,7 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device, con
         config: 配置字典
         epoch: 当前 epoch
         use_tec_cache: 是否使用TEC缓存（多时间尺度优化）
+        scaler: GradScaler for AMP (自动混合精度)
 
     Returns:
         avg_loss: 平均损失
@@ -95,6 +96,8 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device, con
     total_chapman = 0.0
     total_tec_direction = 0.0
     num_batches = 0
+
+    use_amp = config.get('use_amp', False) and scaler is not None
 
     pbar = tqdm(train_loader, desc=f"Epoch {epoch+1} [Train]", leave=False)
 
@@ -110,26 +113,29 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device, con
         if compute_physics:
             coords.requires_grad_(True)
 
-        # 2. 前向传播（支持两种模式：缓存优化 / 向后兼容）
-        if use_tec_cache:
-            # 多时间尺度优化：使用缓存，ConvLSTM只在整点小时运行
-            pred_ne, log_var, correction, extras = model(coords, sw_seq)
-        else:
-            # 向后兼容：直接处理唯一窗口（ConvLSTM不随batch增长）
-            pred_ne, log_var, correction, extras = model(coords, sw_seq, unique_tec_map_seq, tec_indices)
+        # 2. 前向传播（支持AMP）
+        with torch.cuda.amp.autocast(enabled=use_amp):
+            if use_tec_cache:
+                # 多时间尺度优化：使用缓存，ConvLSTM只在整点小时运行
+                pred_ne, log_var, correction, extras = model(coords, sw_seq)
+            else:
+                # 向后兼容：直接处理唯一窗口（ConvLSTM不随batch增长）
+                pred_ne, log_var, correction, extras = model(coords, sw_seq, unique_tec_map_seq, tec_indices)
 
-        # 3. 计算主损失（MSE 或 Huber）
-        if config['use_uncertainty']:
-            # 异方差损失
-            precision = torch.exp(-log_var)
-            mse_term = (pred_ne - target_ne) ** 2
-            loss_main = torch.mean(0.5 * precision * mse_term + 0.5 * log_var)
-        else:
-            # 简单 MSE
-            loss_main = F.mse_loss(pred_ne, target_ne)
+            # 3. 计算主损失（MSE 或 Huber）
+            if config['use_uncertainty']:
+                # 异方差损失
+                precision = torch.exp(-log_var)
+                mse_term = (pred_ne - target_ne) ** 2
+                loss_main = torch.mean(0.5 * precision * mse_term + 0.5 * log_var)
+            else:
+                # 简单 MSE
+                loss_main = F.mse_loss(pred_ne, target_ne)
 
         # 4. 计算物理约束损失（间歇性计算）
+        # ⚠️ 关键：物理损失包含二阶导数，必须在AMP外计算（已在physics_losses中禁用AMP）
         if compute_physics:
+            # 物理损失计算已在函数内部禁用AMP（见chapman_smoothness_loss）
             loss_physics, physics_dict = combined_physics_loss(
                 pred_ne=pred_ne,
                 coords=coords,
@@ -154,15 +160,29 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device, con
         # 5. 总损失
         loss = config['w_mse'] * loss_main + loss_physics
 
-        # 6. 反向传播
+        # 6. 反向传播（支持AMP）
         optimizer.zero_grad()
-        loss.backward()
 
-        # 梯度裁剪
-        if config['grad_clip'] is not None:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), config['grad_clip'])
+        if use_amp:
+            # AMP反向传播
+            scaler.scale(loss).backward()
 
-        optimizer.step()
+            # 梯度裁剪
+            if config['grad_clip'] is not None:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), config['grad_clip'])
+
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            # 标准反向传播
+            loss.backward()
+
+            # 梯度裁剪
+            if config['grad_clip'] is not None:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), config['grad_clip'])
+
+            optimizer.step()
 
         # 7. 统计
         total_loss += loss.item()
@@ -319,12 +339,20 @@ def train_r_stmrf(config):
     # ==================== 3. 准备数据集（随机划分）====================
     print("\n[步骤 3] 准备数据集（随机划分）...")
 
+    # 内存映射设置
+    use_memmap = config.get('use_memmap', False)
+    if use_memmap:
+        print(f"  ✓ 启用Memory-Mapped加载 - 按需从磁盘读取，大幅减少内存占用")
+    else:
+        print(f"  使用全量加载模式 - 一次性加载到内存（更快但内存占用大）")
+
     # 加载全部数据
     full_dataset = FY3D_Dataset(
         npy_path=config['fy_path'],
         mode='train',
         val_days=[],  # 不使用日期过滤，加载全部数据
-        bin_size_hours=config['bin_size_hours']
+        bin_size_hours=config['bin_size_hours'],
+        use_memmap=use_memmap
     )
 
     # 随机划分
@@ -437,6 +465,18 @@ def train_r_stmrf(config):
     else:
         scheduler = None
 
+    # 混合精度训练（AMP）
+    use_amp = config.get('use_amp', False)
+    scaler = None
+    if use_amp:
+        if device.type == 'cuda':
+            scaler = torch.cuda.amp.GradScaler()
+            print(f"  ✓ 启用混合精度训练（AMP）- 加速训练并节省显存")
+            print(f"  ⚠️ Chapman损失（二阶导数）将强制使用float32以避免数值不稳定")
+        else:
+            print(f"  ⚠️ AMP仅支持CUDA设备，已禁用")
+            use_amp = False
+
     # ==================== 6. 训练循环 ====================
     print("\n[步骤 6] 开始训练...")
     physics_freq = config.get('physics_loss_freq', 10)
@@ -459,7 +499,7 @@ def train_r_stmrf(config):
 
         # 训练
         train_loss, train_dict = train_one_epoch(
-            model, train_loader, batch_processor, optimizer, device, config, epoch, use_tec_cache
+            model, train_loader, batch_processor, optimizer, device, config, epoch, use_tec_cache, scaler
         )
         train_losses.append(train_loss)
 

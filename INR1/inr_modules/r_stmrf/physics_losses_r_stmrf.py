@@ -37,45 +37,55 @@ def chapman_smoothness_loss(pred_ne, coords, alt_idx=2, weight_second_order=1.0)
 
     Returns:
         scalar loss
+
+    Note:
+        二阶导数计算在AMP下可能导致数值不稳定，此函数强制使用float32
     """
     # 确保 coords 需要梯度
     if not coords.requires_grad:
         raise ValueError("coords 必须设置 requires_grad=True")
 
-    # 1. 计算一阶导数 ∂Ne/∂coords
-    grad_first = torch.autograd.grad(
-        outputs=pred_ne,
-        inputs=coords,
-        grad_outputs=torch.ones_like(pred_ne),
-        create_graph=True,  # 必须保留计算图以计算二阶导数
-        retain_graph=True,
-        only_inputs=True
-    )[0]  # [Batch, 4]
+    # ⚠️ 关键修复：禁用AMP以避免二阶导数计算时的数值溢出
+    # 二阶导数对精度非常敏感，必须使用float32
+    with torch.cuda.amp.autocast(enabled=False):
+        # 确保所有输入都是float32
+        pred_ne_fp32 = pred_ne.float()
+        coords_fp32 = coords.float()
 
-    # 2. 提取高度方向的一阶导数
-    grad_alt = grad_first[:, alt_idx]  # [Batch]
+        # 1. 计算一阶导数 ∂Ne/∂coords
+        grad_first = torch.autograd.grad(
+            outputs=pred_ne_fp32,
+            inputs=coords_fp32,
+            grad_outputs=torch.ones_like(pred_ne_fp32),
+            create_graph=True,  # 必须保留计算图以计算二阶导数
+            retain_graph=True,
+            only_inputs=True
+        )[0]  # [Batch, 4]
 
-    # 3. 计算二阶导数 ∂²Ne/∂h²
-    grad_second_alt = torch.autograd.grad(
-        outputs=grad_alt,
-        inputs=coords,
-        grad_outputs=torch.ones_like(grad_alt),
-        create_graph=True,
-        retain_graph=True,
-        only_inputs=True
-    )[0][:, alt_idx]  # [Batch]
+        # 2. 提取高度方向的一阶导数
+        grad_alt = grad_first[:, alt_idx]  # [Batch]
 
-    # 4. 惩罚二阶导数的绝对值（或平方）
-    # 选项 A: L2 惩罚（平滑）
-    loss_second = torch.mean(grad_second_alt ** 2)
+        # 3. 计算二阶导数 ∂²Ne/∂h²
+        grad_second_alt = torch.autograd.grad(
+            outputs=grad_alt,
+            inputs=coords_fp32,
+            grad_outputs=torch.ones_like(grad_alt),
+            create_graph=True,
+            retain_graph=True,
+            only_inputs=True
+        )[0][:, alt_idx]  # [Batch]
 
-    # 选项 B: L1 惩罚（稀疏震荡抑制）
-    # loss_second = torch.mean(torch.abs(grad_second_alt))
+        # 4. 惩罚二阶导数的绝对值（或平方）
+        # 选项 A: L2 惩罚（平滑）
+        loss_second = torch.mean(grad_second_alt ** 2)
 
-    # 可选：额外惩罚一阶导数的突变（TV 正则）
-    # loss_first_tv = torch.mean(torch.abs(grad_alt[1:] - grad_alt[:-1]))
+        # 选项 B: L1 惩罚（稀疏震荡抑制）
+        # loss_second = torch.mean(torch.abs(grad_second_alt))
 
-    total_loss = weight_second_order * loss_second
+        # 可选：额外惩罚一阶导数的突变（TV 正则）
+        # loss_first_tv = torch.mean(torch.abs(grad_alt[1:] - grad_alt[:-1]))
+
+        total_loss = weight_second_order * loss_second
 
     return total_loss
 

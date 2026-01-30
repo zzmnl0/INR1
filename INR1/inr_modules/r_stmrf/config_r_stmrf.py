@@ -72,6 +72,9 @@ CONFIG_R_STMRF = {
     'seed': 42,
     'device': 'cuda' if torch.cuda.is_available() else 'cpu',
     'num_workers': 0,  # DataLoader 工作进程数
+    'use_memmap': False,  # 是否使用内存映射按需加载数据（节省内存，略慢）
+                          # True: Memory-mapped loading (低内存占用，适合大数据集)
+                          # False: 全量加载到内存 (高性能，需要足够内存)
 
     # ==================== 学习率调度 ====================
     'scheduler_type': 'cosine',  # 学习率调度器类型 ['cosine', 'step', 'plateau']
