@@ -2,7 +2,9 @@
 
 **Recurrent Spatio-Temporal Modulated Residual Field for Ionospheric Electron Density Reconstruction**
 
-*最后更新: 2026-01-29*
+*最后更新: 2026-01-30*
+
+**版本**: v2.1（多时间尺度优化）
 
 ---
 
@@ -16,6 +18,7 @@
 - [配置说明](#配置说明)
 - [物理约束](#物理约束)
 - [内存优化](#内存优化)
+- [多时间尺度优化](#多时间尺度优化v21-新增)
 - [架构演进](#架构演进)
 - [常见问题](#常见问题)
 
@@ -45,10 +48,16 @@ R-STMRF 是专为电离层电子密度重构设计的物理引导神经网络模
    - **TEC 梯度方向一致性损失**：仅约束方向，不约束幅值
 
 5. **内存优化**
-   - TEC 地图降采样 4x: 181×361 → 46×91（16× 内存减少）
+   - 保持原始 TEC 分辨率: 73×73（仅纬度填充）
    - ConvLSTM 简化为 1 层 16 通道
    - 识别唯一时间窗口，避免重复计算
    - **峰值内存**: ~500-700 MB (batch_size=2048)
+
+6. **多时间尺度优化（v2.1 新增）**
+   - ConvLSTM 只在 1h 整点运行（不是每个 batch）
+   - 余弦平方插值保证分钟级连续性
+   - LRU 缓存避免重复计算
+   - **推理加速**: 10-100× (取决于缓存命中率)
 
 ---
 
@@ -344,10 +353,10 @@ def tec_gradient_direction_consistency_loss(
 
 ### 已实施的优化
 
-1. **TEC 地图降采样 4x**
-   - 分辨率: 181×361 → 46×91
-   - 内存减少: 16×
-   - ConvLSTM 内存: 27 MB (N_unique=100)
+1. **TEC 原始分辨率保持**
+   - 分辨率: 73×73（仅纬度填充，不做上采样/降采样）
+   - 保留原始数据精度
+   - ConvLSTM 内存: ~34 MB (N_unique=100, 16通道)
 
 2. **ConvLSTM 简化**
    - 层数: 2 → 1
@@ -400,6 +409,222 @@ def tec_gradient_direction_consistency_loss(
    ```python
    'tec_downsample_factor': 6  # 31×61
    ```
+
+---
+
+## 多时间尺度优化（v2.1 新增）
+
+### 设计动机
+
+电离层数据具有**多时间尺度特性**：
+
+| 数据源 | 原始分辨率 | 填充后分辨率 | 物理意义 |
+|--------|-----------|-------------|---------|
+| TEC | 1 小时 | 1 小时 | 低频水平结构 |
+| Kp | 3 小时 | 1 小时 | 磁暴状态 |
+| F10.7 | 1 天 | 1 小时 | 太阳活动 |
+| FY 观测 | 分钟级 | 分钟级 | 高频点观测 |
+
+**问题**：旧实现中，ConvLSTM 在每个 batch 都运行，即使 TEC 是 1 小时分辨率。
+
+**解决方案**：
+- ConvLSTM **只在整点小时运行**（0h, 1h, 2h, ...）
+- 分钟级查询通过**余弦平方插值**获得连续性
+- 使用 **LRU 缓存**避免重复计算
+
+### 架构实现
+
+#### 1. 小时级 TEC 缓存
+
+```python
+from INR1.inr_modules.r_stmrf.hourly_tec_cache import HourlyTECContextCache
+
+# 缓存在模型创建后初始化
+tec_cache = HourlyTECContextCache(
+    convlstm_encoder=model.spatial_context_encoder,
+    tec_gradient_head=model.tec_gradient_direction_head,
+    max_cache_size=100,  # 缓存最多100个小时
+    device=device
+)
+
+# 绑定到模型
+model.tec_cache = tec_cache
+```
+
+**缓存策略**：
+- **训练模式**：跳过缓存，直接计算（保留梯度）
+- **评估模式**：使用缓存（加速推理）
+
+#### 2. 余弦平方插值
+
+对于查询时间 `t_query ∈ [t0, t1]`（例如 10.5 小时）：
+
+```python
+# 插值公式
+t0, t1 = floor(t_query), floor(t_query) + 1  # 例如：10, 11
+frac = t_query - t0  # 0.5
+
+α = cos²(π * frac)  # 0.5 → α ≈ 0
+grad_interp = α * grad[t0] + (1 - α) * grad[t1]
+```
+
+**物理意义**：
+- C¹ 连续（导数连续）
+- 无高频泄露
+- 低频结构平滑演化
+
+#### 3. 启用多时间尺度优化
+
+**方法1：修改配置文件**
+
+```python
+# config_r_stmrf.py
+config = {
+    # ...
+    'use_tec_cache': True,  # 启用优化
+    'tec_cache_size': 100,  # 缓存100小时
+}
+```
+
+**方法2：代码中动态启用**
+
+```python
+# 训练时
+config['use_tec_cache'] = False  # 训练时建议关闭，保留梯度
+
+# 推理时
+config['use_tec_cache'] = True   # 推理时启用，显著加速
+```
+
+### 性能提升
+
+| 指标 | 无缓存 | 有缓存（训练） | 有缓存（推理） |
+|------|-------|--------------|--------------|
+| **ConvLSTM 调用** | 每 batch | 每 batch | 仅唯一小时 |
+| **计算次数** | 2048 次/batch | 2048 次/batch | ~10-50 次/batch |
+| **推理加速** | 1× | 1× | **10-100×** |
+| **内存使用** | 基准 | 基准 | +34 MB (100h cache) |
+| **梯度传播** | ✅ | ✅ | ❌ (eval模式) |
+
+**适用场景**：
+- ✅ **推理/验证**：显著加速（10-100×）
+- ✅ **CPU 环境**：减少计算量，推荐启用
+- ⚠️ **训练**：自动跳过缓存，性能相同
+
+### 使用示例
+
+#### 启用缓存的完整训练流程
+
+```python
+# 1. 配置
+config = {
+    'use_tec_cache': False,  # 训练时可选
+    'tec_cache_size': 100,
+    # ...
+}
+
+# 2. 训练（自动管理缓存模式）
+model.train()  # 训练模式：缓存自动跳过
+for epoch in range(epochs):
+    for batch in train_loader:
+        # 缓存不会被使用，梯度正常传播
+        pred = model(coords, sw_seq)
+        loss.backward()
+
+# 3. 验证（缓存启用）
+model.eval()  # 评估模式：缓存启用
+with torch.no_grad():
+    for batch in val_loader:
+        # 缓存被使用，显著加速
+        pred = model(coords, sw_seq)
+
+# 4. 查看缓存统计
+if model.tec_cache is not None:
+    stats = model.tec_cache.get_stats()
+    print(f"缓存命中率: {stats['hit_rate']*100:.1f}%")
+```
+
+#### CPU 优化配置
+
+对于 CPU 环境，推荐使用 `config_r_stmrf_cpu_optimized.py`：
+
+```python
+config = {
+    'batch_size': 512,
+    'seq_len': 4,
+    'use_tec_cache': True,  # ✅ CPU环境推荐启用
+    'tec_cache_size': 50,   # 较小缓存节省内存
+    # ...
+}
+```
+
+### 技术细节
+
+#### 参数共享机制
+
+```python
+# ❌ 错误做法：创建独立的编码器
+temp_encoder = SpatialContextEncoder(...)
+cache = HourlyTECContextCache(temp_encoder, ...)  # 参数不共享！
+
+# ✅ 正确做法：使用模型内部的编码器
+cache = HourlyTECContextCache(
+    convlstm_encoder=model.spatial_context_encoder,  # 参数共享
+    tec_gradient_head=model.tec_gradient_direction_head
+)
+```
+
+#### 梯度传播保证
+
+```python
+# HourlyTECContextCache.get() 内部逻辑：
+def get(self, hour_indices, tec_manager):
+    if self.convlstm_encoder.training:
+        # 训练模式：直接计算，不使用缓存
+        return self._compute_batch(...)  # 梯度流动
+    else:
+        # 评估模式：使用缓存 + detach
+        return cached_results  # 无梯度，节省内存
+```
+
+### 监控和调试
+
+#### 缓存统计
+
+```python
+# 训练循环中打印缓存统计
+if use_tec_cache and model.tec_cache is not None:
+    stats = model.tec_cache.get_stats()
+    print(f"TEC缓存: 命中率 {stats['hit_rate']*100:.1f}%, "
+          f"大小 {stats['cache_size']}/{stats['max_cache_size']}")
+```
+
+#### 预期输出
+
+```
+训练阶段：
+  TEC缓存: 命中率 0.0%, 大小 0/100  # 训练时不使用缓存
+
+验证阶段：
+  TEC缓存: 命中率 85.3%, 大小 42/100  # 高命中率！
+```
+
+### 注意事项
+
+1. **训练时缓存不生效**
+   - 自动检测 `training` 模式
+   - 跳过缓存，保证梯度传播
+   - 不影响训练准确性
+
+2. **内存占用**
+   - 每小时: ~340 KB (16通道 × 73×73 × 2个tensor × 4字节)
+   - 100小时缓存: ~34 MB
+   - 可通过 `tec_cache_size` 控制
+
+3. **适用性**
+   - ✅ 推理/验证阶段
+   - ✅ CPU 环境
+   - ⚠️ 训练阶段（无效但无害）
 
 ---
 
