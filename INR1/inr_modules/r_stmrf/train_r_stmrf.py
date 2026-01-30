@@ -360,45 +360,6 @@ def train_r_stmrf(config):
     # 创建批次处理器
     batch_processor = SlidingWindowBatchProcessor(sw_manager, tec_manager, device)
 
-    # ==================== 3.5. 初始化小时级TEC缓存（可选优化）====================
-    use_tec_cache = config.get('use_tec_cache', False)  # 默认关闭，保持向后兼容
-    tec_cache = None
-
-    if use_tec_cache:
-        print("\n[步骤 3.5] 初始化小时级TEC缓存（多时间尺度优化）...")
-        from .hourly_tec_cache import HourlyTECContextCache
-
-        # 需要先临时创建ConvLSTM和梯度头用于缓存
-        # 这些将在模型初始化时被复用
-        from .recurrent_parts import SpatialContextEncoder
-        import torch.nn as nn
-
-        # 创建临时编码器（稍后会被模型使用）
-        temp_convlstm = SpatialContextEncoder(
-            input_dim=1,
-            hidden_dim=config.get('tec_feat_dim', 16),
-            num_layers=config.get('convlstm_layers', 1),
-            kernel_size=config.get('convlstm_kernel', 3)
-        ).to(device)
-
-        temp_grad_head = nn.Sequential(
-            nn.Conv2d(config.get('tec_feat_dim', 16), 8, kernel_size=1),
-            nn.ReLU(),
-            nn.Conv2d(8, 2, kernel_size=1),
-            nn.Tanh()
-        ).to(device)
-
-        # 创建缓存
-        tec_cache = HourlyTECContextCache(
-            convlstm_encoder=temp_convlstm,
-            tec_gradient_head=temp_grad_head,
-            max_cache_size=config.get('tec_cache_size', 100),
-            device=device
-        )
-
-        print(f"  ✓ TEC缓存初始化完成（最大缓存: {config.get('tec_cache_size', 100)} 小时）")
-        print(f"  ✓ ConvLSTM 将只在整点小时运行，使用余弦平方插值到分钟级")
-
     # ==================== 4. 初始化模型 ====================
     print("\n[步骤 4] 初始化 R-STMRF 模型...")
 
@@ -411,10 +372,34 @@ def train_r_stmrf(config):
         tec_manager=tec_manager,
         start_date_str=config['start_date_str'],
         config=config,
-        tec_cache=tec_cache
+        tec_cache=None  # 先不传缓存，等模型创建后再初始化
     ).to(device)
 
     print(f"  模型参数量: {sum(p.numel() for p in model.parameters()):,}")
+
+    # ==================== 4.5. 初始化小时级TEC缓存（可选优化）====================
+    # 重要：必须在模型创建后初始化，以使用模型内部的 ConvLSTM 和梯度头
+    use_tec_cache = config.get('use_tec_cache', False)  # 默认关闭，保持向后兼容
+
+    if use_tec_cache:
+        print("\n[步骤 4.5] 初始化小时级TEC缓存（多时间尺度优化）...")
+        from .hourly_tec_cache import HourlyTECContextCache
+
+        # 使用模型内部的 ConvLSTM 和梯度头（参数共享！）
+        tec_cache = HourlyTECContextCache(
+            convlstm_encoder=model.spatial_context_encoder,
+            tec_gradient_head=model.tec_gradient_direction_head,
+            max_cache_size=config.get('tec_cache_size', 100),
+            device=device
+        )
+
+        # 将缓存绑定到模型
+        model.tec_cache = tec_cache
+
+        print(f"  ✓ TEC缓存初始化完成（最大缓存: {config.get('tec_cache_size', 100)} 小时）")
+        print(f"  ✓ ConvLSTM 将只在整点小时运行，使用余弦平方插值到分钟级")
+        print(f"  ✓ 缓存与模型参数共享，确保训练时一致性")
+        print(f"  ✓ 训练模式：跳过缓存（保留梯度）| 评估模式：启用缓存（加速推理）")
 
     # ==================== 5. 优化器和调度器 ====================
     print("\n[步骤 5] 配置优化器...")
