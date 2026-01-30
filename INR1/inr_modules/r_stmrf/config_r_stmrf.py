@@ -89,6 +89,9 @@ CONFIG_R_STMRF = {
     # 物理约束损失（新设计）
     'w_chapman': 0.1,  # Chapman 垂直平滑损失权重
     'w_tec_direction': 0.03,  # TEC 梯度方向一致性权重（新设计 - 取较小值避免过约束）
+    'physics_loss_freq': 10,  # 物理损失计算频率（每N个batch计算一次，加速训练）
+                               # 设为1表示每个batch都计算（无加速）
+                               # 设为10表示每10个batch计算一次（推荐，2-3倍加速）
 
     # 已弃用的损失（兼容性保留）
     'w_tec_align': 0.0,  # 旧的 TEC 梯度对齐损失（已弃用，设为 0）

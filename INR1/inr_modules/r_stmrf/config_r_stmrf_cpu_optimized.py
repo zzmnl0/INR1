@@ -73,6 +73,7 @@ CONFIG_R_STMRF_CPU_OPTIMIZED = {
     'w_mse': 1.0,
     'w_chapman': 0.1,
     'w_tec_direction': 0.02,  # 0.03 → 0.02 (降低约束强度)
+    'physics_loss_freq': 20,  # 10 → 20 (CPU环境更激进地跳过物理损失计算，显著加速)
     'w_tec_align': 0.0,
     'w_smooth': 0.0,
     'w_iri_dir': 0.0,
