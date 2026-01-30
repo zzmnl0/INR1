@@ -14,7 +14,8 @@ CONFIG_R_STMRF_CPU_OPTIMIZED = {
     'fy_path': r'D:\FYsatellite\EDP_data\fy_202409_clean.npy',
     'iri_proxy_path': r"D:\code11\IRI01\output_results\iri_september_full_proxy.pth",
     'sw_path': r'D:\FYsatellite\EDP_data\kp\OMNI_Kp_F107_20240901_20241001.txt',
-    'tec_path': r'D:\IGS\VTEC\tec_map_data.npy',
+    'tec_path': r'D:\IGS\VTEC\tec_map_data.npy',  # 原始 TEC 数据（用于预计算）
+    'gradient_bank_path': r'D:\IGS\VTEC\tec_gradient_bank.npy',  # 预计算的 TEC 梯度库
     'save_dir': './checkpoints_r_stmrf_cpu',
 
     # ==================== 数据规格 ====================
@@ -104,10 +105,6 @@ CONFIG_R_STMRF_CPU_OPTIMIZED = {
 
     # ==================== TEC 梯度对齐参数 ====================
     'tec_gradient_threshold_percentile': 50.0,
-
-    # ==================== 多时间尺度优化（CPU推荐启用）====================
-    'use_tec_cache': True,  # 启用小时级TEC缓存（减少ConvLSTM计算次数）
-    'tec_cache_size': 50,  # CPU环境使用较小的缓存
 }
 
 
