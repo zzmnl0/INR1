@@ -69,7 +69,7 @@ class SubsetTimeBinSampler(TimeBinSampler):
         self.drop_last = drop_last
 
 
-def train_one_epoch(model, train_loader, batch_processor, optimizer, device, config, epoch):
+def train_one_epoch(model, train_loader, batch_processor, optimizer, device, config, epoch, use_tec_cache=False):
     """
     训练一个 epoch
 
@@ -81,6 +81,7 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device, con
         device: 设备
         config: 配置字典
         epoch: 当前 epoch
+        use_tec_cache: 是否使用TEC缓存（多时间尺度优化）
 
     Returns:
         avg_loss: 平均损失
@@ -177,7 +178,7 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device, con
     return avg_loss, loss_dict
 
 
-def validate(model, val_loader, batch_processor, device, config):
+def validate(model, val_loader, batch_processor, device, config, use_tec_cache=False):
     """
     验证模型
 
@@ -187,6 +188,7 @@ def validate(model, val_loader, batch_processor, device, config):
         batch_processor: 批次处理器
         device: 设备
         config: 配置字典
+        use_tec_cache: 是否使用TEC缓存（多时间尺度优化）
 
     Returns:
         avg_loss: 平均损失
@@ -436,12 +438,12 @@ def train_r_stmrf(config):
 
         # 训练
         train_loss, train_dict = train_one_epoch(
-            model, train_loader, batch_processor, optimizer, device, config, epoch
+            model, train_loader, batch_processor, optimizer, device, config, epoch, use_tec_cache
         )
         train_losses.append(train_loss)
 
         # 验证
-        val_loss, val_metrics = validate(model, val_loader, batch_processor, device, config)
+        val_loss, val_metrics = validate(model, val_loader, batch_processor, device, config, use_tec_cache)
         val_losses.append(val_loss)
 
         # 打印结果
