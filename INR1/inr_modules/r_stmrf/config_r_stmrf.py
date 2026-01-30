@@ -12,7 +12,8 @@ CONFIG_R_STMRF = {
     'fy_path': r'D:\FYsatellite\EDP_data\fy_202409_clean.npy',
     'iri_proxy_path': r"D:\code11\IRI01\output_results\iri_september_full_proxy.pth",
     'sw_path': r'D:\FYsatellite\EDP_data\kp\OMNI_Kp_F107_20240901_20241001.txt',
-    'tec_path': r'D:\IGS\VTEC\tec_map_data.npy',
+    'tec_path': r'D:\IGS\VTEC\tec_map_data.npy',  # 原始 TEC 数据（用于预计算）
+    'gradient_bank_path': r'D:\IGS\VTEC\tec_gradient_bank.npy',  # 预计算的 TEC 梯度库（新架构）
     'save_dir': './checkpoints_r_stmrf',
 
     # ==================== 数据规格 ====================
@@ -36,33 +37,22 @@ CONFIG_R_STMRF = {
     'omega_0': 30.0,  # SIREN 频率因子
 
     # ==================== 循环网络参数 ====================
-    # ConvLSTM (TEC 区域级上下文编码器 - 梯度方向约束源，非数值调制)
-    # 新设计: TEC 仅作为"时序水平梯度方向约束"，不直接调制电子密度
-    # 职责: 提取 TEC 水平梯度方向的时序演化特征 F_TEC
-    # 作用: 通过梯度方向一致性损失约束 Ne_fused，不参与数值预测
-    #
-    # TEC 数据规格（保持原始分辨率）:
-    # - 原始: (720, 71, 73) - Time × Lat × Lon
-    # - Lat: -87.5 ~ 87.5, 步长 2.5° (71个点)
-    # - Lon: -180 ~ 180, 步长 5° (73个点)
-    # - 纬度填充后: (720, 73, 73) - 填充到 -90 ~ 90
-    #
-    # 内存优化:
-    # ConvLSTM 作用于区域级背景场，不随 batch_size 增长
-    # 内存占用: N_unique * tec_feat_dim * tec_h * tec_w * 4 bytes（与 batch_size 无关！）
-    #   示例: 原始分辨率 73×73
-    #         10 * 16 * 73 * 73 * 4 = ~3.4 MB（极小，即使 N_unique=100 也只需 34 MB）
-    #         100 * 16 * 73 * 73 * 4 = ~34 MB（可接受，batch_size=2048 无压力）
-    'tec_feat_dim': 16,  # ConvLSTM 输出通道数（梯度方向特征，无需太大）
-    'tec_h': 73,  # TEC 地图高度（纬度填充后）
-    'tec_w': 73,  # TEC 地图宽度（原始）
-    'convlstm_layers': 1,  # ConvLSTM 层数（简化，只需提取低频梯度方向）
-    'convlstm_kernel': 3,  # ConvLSTM 卷积核大小
-
-    # LSTM (全局环境编码器)
+    # LSTM (全局环境编码器 - 仍然保留)
     'env_hidden_dim': 64,  # LSTM 隐层维度
     'lstm_layers': 2,  # LSTM 层数
     'lstm_dropout': 0.1,  # LSTM Dropout
+
+    # TEC 相关参数（新架构：离线预计算）
+    # - ConvLSTM 已移除，使用 TecGradientBank 替代
+    # - TEC 梯度方向通过 precompute_tec_gradient_bank.py 离线计算
+    # - 训练时使用 memory-mapped loading + 时间插值
+    'tec_h': 73,  # TEC 地图高度（纬度填充后，保留用于物理损失）
+    'tec_w': 73,  # TEC 地图宽度（原始，保留用于物理损失）
+
+    # 已废弃参数（保留用于兼容性）
+    'tec_feat_dim': 16,  # [已废弃] ConvLSTM 输出通道数
+    'convlstm_layers': 1,  # [已废弃] ConvLSTM 层数
+    'convlstm_kernel': 3,  # [已废弃] ConvLSTM 卷积核大小
 
     # ==================== 训练超参数 ====================
     'batch_size': 2048,  # 批次大小（ConvLSTM 不随 batch 增长，可使用大 batch）
@@ -127,10 +117,6 @@ CONFIG_R_STMRF = {
 
     # ==================== TEC 梯度对齐参数 ====================
     'tec_gradient_threshold_percentile': 50.0,  # TEC 梯度显著性阈值（百分位数）
-
-    # ==================== 多时间尺度优化 ====================
-    'use_tec_cache': False,  # 是否启用小时级TEC缓存（默认关闭，保持向后兼容）
-    'tec_cache_size': 100,  # TEC 缓存最大小时数（启用缓存时有效）
 }
 
 

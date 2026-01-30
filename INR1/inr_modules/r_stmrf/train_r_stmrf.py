@@ -28,6 +28,7 @@ from config_r_stmrf import get_config_r_stmrf, print_config_r_stmrf
 from r_stmrf_model import R_STMRF_Model
 from physics_losses_r_stmrf import combined_physics_loss
 from sliding_dataset import SlidingWindowBatchProcessor
+from tec_gradient_bank import TecGradientBank
 
 from data_managers import SpaceWeatherManager, TECDataManager, IRINeuralProxy
 from data_managers.FY_dataloader import FY3D_Dataset, TimeBinSampler
@@ -69,7 +70,7 @@ class SubsetTimeBinSampler(TimeBinSampler):
         self.drop_last = drop_last
 
 
-def train_one_epoch(model, train_loader, batch_processor, optimizer, device, config, epoch, use_tec_cache=False, scaler=None):
+def train_one_epoch(model, train_loader, batch_processor, gradient_bank, optimizer, device, config, epoch, scaler=None):
     """
     训练一个 epoch
 
@@ -77,11 +78,11 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device, con
         model: R-STMRF 模型
         train_loader: 训练数据 loader
         batch_processor: 批次处理器
+        gradient_bank: TecGradientBank 实例（预计算梯度库）
         optimizer: 优化器
         device: 设备
         config: 配置字典
         epoch: 当前 epoch
-        use_tec_cache: 是否使用TEC缓存（多时间尺度优化）
         scaler: GradScaler for AMP (自动混合精度)
 
     Returns:
@@ -102,8 +103,12 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device, con
     pbar = tqdm(train_loader, desc=f"Epoch {epoch+1} [Train]", leave=False)
 
     for batch_idx, batch_data in enumerate(pbar):
-        # 1. 处理批次数据（获取序列，识别唯一时间窗口）
-        coords, target_ne, sw_seq, unique_tec_map_seq, tec_indices, target_tec_map = batch_processor.process_batch(batch_data)
+        # 1. 处理批次数据（获取序列）
+        coords, target_ne, sw_seq = batch_processor.process_batch(batch_data)
+
+        # 2. 查询预计算的 TEC 梯度方向（快速查询，无 ConvLSTM 计算）
+        timestamps = coords[:, 3]  # 提取时间维度 [Batch]
+        tec_grad_direction = gradient_bank.get_interpolated_gradient(timestamps)  # [Batch, 2, H, W]
 
         # 判断是否需要计算物理损失（间歇性计算以加速训练）
         physics_loss_freq = config.get('physics_loss_freq', 10)  # 默认每10个batch计算一次
@@ -113,14 +118,9 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device, con
         if compute_physics:
             coords.requires_grad_(True)
 
-        # 2. 前向传播（支持AMP）
+        # 3. 前向传播（支持AMP）
         with torch.cuda.amp.autocast(enabled=use_amp):
-            if use_tec_cache:
-                # 多时间尺度优化：使用缓存，ConvLSTM只在整点小时运行
-                pred_ne, log_var, correction, extras = model(coords, sw_seq)
-            else:
-                # 向后兼容：直接处理唯一窗口（ConvLSTM不随batch增长）
-                pred_ne, log_var, correction, extras = model(coords, sw_seq, unique_tec_map_seq, tec_indices)
+            pred_ne, log_var, correction, extras = model(coords, sw_seq, tec_grad_direction)
 
             # 3. 计算主损失（MSE 或 Huber）
             if config['use_uncertainty']:
@@ -213,7 +213,7 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device, con
     return avg_loss, loss_dict
 
 
-def validate(model, val_loader, batch_processor, device, config, use_tec_cache=False):
+def validate(model, val_loader, batch_processor, gradient_bank, device, config):
     """
     验证模型
 
@@ -221,9 +221,9 @@ def validate(model, val_loader, batch_processor, device, config, use_tec_cache=F
         model: R-STMRF 模型
         val_loader: 验证数据 loader
         batch_processor: 批次处理器
+        gradient_bank: TecGradientBank 实例（预计算梯度库）
         device: 设备
         config: 配置字典
-        use_tec_cache: 是否使用TEC缓存（多时间尺度优化）
 
     Returns:
         avg_loss: 平均损失
@@ -240,14 +240,15 @@ def validate(model, val_loader, batch_processor, device, config, use_tec_cache=F
 
     with torch.no_grad():
         for batch_data in tqdm(val_loader, desc="Validating", leave=False):
-            # 处理批次（识别唯一时间窗口）
-            coords, target_ne, sw_seq, unique_tec_map_seq, tec_indices, target_tec_map = batch_processor.process_batch(batch_data)
+            # 处理批次数据
+            coords, target_ne, sw_seq = batch_processor.process_batch(batch_data)
 
-            # 前向传播（支持两种模式）
-            if use_tec_cache:
-                pred_ne, log_var, correction, extras = model(coords, sw_seq)
-            else:
-                pred_ne, log_var, correction, extras = model(coords, sw_seq, unique_tec_map_seq, tec_indices)
+            # 查询预计算的 TEC 梯度方向
+            timestamps = coords[:, 3]  # 提取时间维度 [Batch]
+            tec_grad_direction = gradient_bank.get_interpolated_gradient(timestamps)  # [Batch, 2, H, W]
+
+            # 前向传播
+            pred_ne, log_var, correction, extras = model(coords, sw_seq, tec_grad_direction)
 
             # MSE 损失
             loss_mse = F.mse_loss(pred_ne, target_ne)
@@ -416,35 +417,30 @@ def train_r_stmrf(config):
         sw_manager=sw_manager,
         tec_manager=tec_manager,
         start_date_str=config['start_date_str'],
-        config=config,
-        tec_cache=None  # 先不传缓存，等模型创建后再初始化
+        config=config
     ).to(device)
 
     print(f"  模型参数量: {sum(p.numel() for p in model.parameters()):,}")
 
-    # ==================== 4.5. 初始化小时级TEC缓存（可选优化）====================
-    # 重要：必须在模型创建后初始化，以使用模型内部的 ConvLSTM 和梯度头
-    use_tec_cache = config.get('use_tec_cache', False)  # 默认关闭，保持向后兼容
+    # ==================== 4.5. 初始化 TEC 梯度库（新架构）====================
+    print("\n[步骤 4.5] 初始化 TEC 梯度库（离线预计算 + 快速查询）...")
 
-    if use_tec_cache:
-        print("\n[步骤 4.5] 初始化小时级TEC缓存（多时间尺度优化）...")
-        from .hourly_tec_cache import HourlyTECContextCache
+    gradient_bank_path = config.get('gradient_bank_path')
+    if gradient_bank_path is None:
+        raise ValueError("配置中缺少 'gradient_bank_path' 参数！\n"
+                        "请先运行 precompute_tec_gradient_bank.py 生成梯度库，"
+                        "然后在配置中指定路径。")
 
-        # 使用模型内部的 ConvLSTM 和梯度头（参数共享！）
-        tec_cache = HourlyTECContextCache(
-            convlstm_encoder=model.spatial_context_encoder,
-            tec_gradient_head=model.tec_gradient_direction_head,
-            max_cache_size=config.get('tec_cache_size', 100),
-            device=device
-        )
+    gradient_bank = TecGradientBank(
+        gradient_bank_path=gradient_bank_path,
+        total_hours=config['total_hours'],
+        device=device
+    )
 
-        # 将缓存绑定到模型
-        model.tec_cache = tec_cache
-
-        print(f"  ✓ TEC缓存初始化完成（最大缓存: {config.get('tec_cache_size', 100)} 小时）")
-        print(f"  ✓ ConvLSTM 将只在整点小时运行，使用余弦平方插值到分钟级")
-        print(f"  ✓ 缓存与模型参数共享，确保训练时一致性")
-        print(f"  ✓ 训练模式：跳过缓存（保留梯度）| 评估模式：启用缓存（加速推理）")
+    print(f"  ✓ TEC 梯度库加载成功")
+    print(f"  ✓ 使用内存映射（Memory-Mapped）模式，RAM 占用 < 10 MB")
+    print(f"  ✓ 支持余弦平方插值，保证 C1 连续性")
+    print(f"  ✓ 完全消除 ConvLSTM 在线计算开销")
 
     # ==================== 5. 优化器和调度器 ====================
     print("\n[步骤 5] 配置优化器...")
@@ -499,12 +495,12 @@ def train_r_stmrf(config):
 
         # 训练
         train_loss, train_dict = train_one_epoch(
-            model, train_loader, batch_processor, optimizer, device, config, epoch, use_tec_cache, scaler
+            model, train_loader, batch_processor, gradient_bank, optimizer, device, config, epoch, scaler
         )
         train_losses.append(train_loss)
 
         # 验证
-        val_loss, val_metrics = validate(model, val_loader, batch_processor, device, config, use_tec_cache)
+        val_loss, val_metrics = validate(model, val_loader, batch_processor, gradient_bank, device, config)
         val_losses.append(val_loss)
 
         # 打印结果
@@ -518,14 +514,6 @@ def train_r_stmrf(config):
         print(f"    - MAE: {val_metrics['mae']:.6f}")
         print(f"    - RMSE: {val_metrics['rmse']:.6f}")
         print(f"    - R²: {val_metrics['r2']:.4f}")
-
-        # TEC缓存统计（如果启用）
-        if use_tec_cache and tec_cache is not None:
-            cache_stats = tec_cache.get_stats()
-            print(f"  TEC缓存统计:")
-            print(f"    - 命中率: {cache_stats['hit_rate']*100:.1f}% "
-                  f"({cache_stats['hits']}/{cache_stats['total_queries']})")
-            print(f"    - 缓存大小: {cache_stats['cache_size']}/{cache_stats['max_cache_size']}")
 
         # 学习率调度
         if scheduler is not None:

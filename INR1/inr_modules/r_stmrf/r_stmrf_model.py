@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 
 from .siren_layers import ModulatedSIRENNet
-from .recurrent_parts import GlobalEnvEncoder, SpatialContextEncoder
+from .recurrent_parts import GlobalEnvEncoder
 
 
 class R_STMRF_Model(nn.Module):
@@ -31,8 +31,7 @@ class R_STMRF_Model(nn.Module):
     """
 
     def __init__(self, iri_proxy, lat_range, lon_range, alt_range,
-                 sw_manager=None, tec_manager=None, start_date_str=None, config=None,
-                 tec_cache=None):
+                 sw_manager=None, tec_manager=None, start_date_str=None, config=None):
         """
         Args:
             iri_proxy: IRI 神经代理场（冻结）
@@ -40,10 +39,9 @@ class R_STMRF_Model(nn.Module):
             lon_range: 经度范围
             alt_range: 高度范围
             sw_manager: 空间天气管理器
-            tec_manager: TEC 管理器
+            tec_manager: TEC 管理器（保留用于兼容性，实际不使用）
             start_date_str: 起始日期字符串
             config: 配置字典
-            tec_cache: HourlyTECContextCache 实例（可选，用于多时间尺度优化）
         """
         super().__init__()
 
@@ -58,9 +56,6 @@ class R_STMRF_Model(nn.Module):
         self.sw_manager = sw_manager
         self.tec_manager = tec_manager
         self.start_date = pd.to_datetime(start_date_str) if start_date_str else None
-
-        # 多时间尺度优化：小时级TEC缓存（可选）
-        self.tec_cache = tec_cache
 
         # IRI 神经代理场（冻结）
         self.iri_proxy = iri_proxy
@@ -94,26 +89,12 @@ class R_STMRF_Model(nn.Module):
             omega_0=self.omega_0
         )
 
-        # 空间上下文编码器 (ConvLSTM) - 梯度方向约束源（不是数值调制）
-        # 新设计: TEC 仅作为"时序水平梯度方向约束"
-        # 职责: 提取 TEC 水平梯度方向的时序演化特征 F_TEC
-        # 输出: 2D 低频特征场，表示期望的水平变化方向（用于损失计算）
-        # 注意: 不直接调制电子密度，不参与数值预测
-        self.spatial_context_encoder = SpatialContextEncoder(
-            input_dim=1,
-            hidden_dim=self.tec_feat_dim,
-            num_layers=config.get('convlstm_layers', 1),  # 简化为 1 层
-            kernel_size=config.get('convlstm_kernel', 3)
-        )
-
-        # TEC 梯度方向提取头（用于损失计算，不是调制）
-        # 将 F_TEC 映射为期望的梯度方向向量（2D: lat_grad, lon_grad）
-        self.tec_gradient_direction_head = nn.Sequential(
-            nn.Conv2d(self.tec_feat_dim, 8, kernel_size=1),
-            nn.ReLU(),
-            nn.Conv2d(8, 2, kernel_size=1),  # 输出 2 通道: (grad_lat, grad_lon)
-            nn.Tanh()  # 归一化到 [-1, 1]
-        )
+        # ==================== TEC 梯度方向（外部输入）====================
+        # 新架构: TEC 梯度方向通过离线预计算 + 时间插值获得（TecGradientBank）
+        # - 移除 ConvLSTM (SpatialContextEncoder)
+        # - 移除 tec_gradient_direction_head
+        # - TEC 梯度方向作为 forward() 的外部输入传入
+        # 优势: 消除在线 ConvLSTM 计算，大幅降低内存和训练时间
 
         # ==================== 分支 B: 时间分支 ====================
         # 时间基函数网络 (SIREN)
@@ -215,84 +196,18 @@ class R_STMRF_Model(nn.Module):
         history_times = current_time_batch.unsqueeze(1) - offsets.unsqueeze(0)
         return history_times < 0
 
-    def _interpolate_tec_gradient(self, grad_direction_dict, time):
+
+    def forward(self, coords, sw_seq, tec_grad_direction):
         """
-        余弦平方插值 TEC 梯度方向（保证亚小时尺度连续性）
-
-        物理先验: 低频TEC结构应平滑演化，cos²/sin² 保证 C¹ 连续、无高频泄露
-
-        插值公式:
-            t_query ∈ [t0, t1]，其中 t0 = floor(t_query), t1 = t0 + 1
-            frac = t_query - t0 ∈ [0, 1]
-            α = cos²(π * frac)  # 权重从 1 → 0 (t0 → t1)
-            result = α * grad[t0] + (1 - α) * grad[t1]
-
-        Args:
-            grad_direction_dict: {hour: [1, 2, H, W]} 整点小时的梯度方向（来自缓存）
-            time: [Batch] 查询点的实际时间（浮点数，可能包含分钟）
-
-        Returns:
-            [Batch, 2, H, W] 插值后的梯度方向
-        """
-        batch_size = time.shape[0]
-        device = time.device
-
-        # 1. 计算下界和上界小时
-        time_floor = torch.floor(time).long()  # [Batch]
-        time_ceil = torch.clamp(time_floor + 1, max=int(self.total_hours) - 1)  # [Batch]
-
-        # 2. 计算小数部分（0 到 1 之间）
-        frac = time - time_floor.float()  # [Batch]
-
-        # 3. 计算余弦平方插值权重
-        # α = cos²(π * frac)，当 frac=0 时 α=1，当 frac=1 时 α=0
-        alpha = torch.cos(torch.pi * frac) ** 2  # [Batch]
-
-        # 4. 批量索引梯度方向
-        # 预分配输出张量
-        if len(grad_direction_dict) > 0:
-            first_val = next(iter(grad_direction_dict.values()))
-            _, _, H, W = first_val.shape
-        else:
-            raise ValueError("grad_direction_dict 为空，无法进行插值")
-
-        grad_interp = torch.zeros(batch_size, 2, H, W, device=device)
-
-        # 5. 逐样本插值（可优化为批量操作，但需处理重复索引）
-        for i in range(batch_size):
-            t0 = time_floor[i].item()
-            t1 = time_ceil[i].item()
-            a = alpha[i]
-
-            grad_t0 = grad_direction_dict.get(t0)
-            grad_t1 = grad_direction_dict.get(t1)
-
-            if grad_t0 is None or grad_t1 is None:
-                # 如果缓存未命中（理论上不应发生），使用最近邻
-                grad_nearest = grad_t0 if grad_t0 is not None else grad_t1
-                if grad_nearest is not None:
-                    grad_interp[i] = grad_nearest.squeeze(0)
-                else:
-                    # 极端情况：两个都未缓存，填充零
-                    pass
-            else:
-                # 正常插值
-                grad_interp[i] = a * grad_t0.squeeze(0) + (1 - a) * grad_t1.squeeze(0)
-
-        return grad_interp
-
-    def forward(self, coords, sw_seq, unique_tec_map_seq=None, tec_indices=None):
-        """
-        前向传播（支持两种模式）
-
-        模式1（多时间尺度优化）：使用 tec_cache，unique_tec_map_seq 和 tec_indices 可为 None
-        模式2（向后兼容）：不使用 tec_cache，必须提供 unique_tec_map_seq 和 tec_indices
+        前向传播（新架构：接受预计算的 TEC 梯度方向）
 
         Args:
             coords: [Batch, 4] (Lat, Lon, Alt, Time)
             sw_seq: [Batch, Seq, 2] 空间天气序列 (Kp, F10.7)
-            unique_tec_map_seq: [N_unique, Seq, 1, H, W] 唯一时间窗口的 TEC 地图序列（可选）
-            tec_indices: [Batch] 每个样本对应的唯一时间窗口索引（可选）
+            tec_grad_direction: [Batch, 2, H, W] 预计算的 TEC 梯度方向（单位向量）
+                               - Channel 0: normalized grad_lat
+                               - Channel 1: normalized grad_lon
+                               - 通过 TecGradientBank 离线预计算 + 时间插值获得
 
         Returns:
             output: [Batch, 1] 预测 Ne (对数尺度)
@@ -318,58 +233,19 @@ class R_STMRF_Model(nn.Module):
         # 4. 时序掩码
         temporal_mask = self.create_temporal_mask(time)
 
-        # ==================== 分支 A: 空间分支（主路 + Context 调制）====================
+        # ==================== 分支 A: 空间分支 ====================
         # A1. 生成空间基函数（主建模网络）
         spatial_input = torch.stack([lat_n, lon_n, alt_n, sin_lt, cos_lt], dim=1)
         h_spatial = self.spatial_basis_net(spatial_input)  # [Batch, basis_dim]
         # h_spatial 表示"在无时序约束下的电子密度空间基函数"
 
-        # ==================== A2. TEC 区域级梯度方向特征提取（ConvLSTM - Batch-Free）====================
-        # 新设计: TEC 仅作为"时序水平梯度方向约束"，不直接调制电子密度
-        # 支持两种模式：
-        # 模式1（多时间尺度优化）：使用 HourlyTECContextCache，ConvLSTM只在1h整点运行
-        # 模式2（向后兼容）：直接处理batch中的唯一时间窗口
+        # A2. TEC 梯度方向（外部输入，无需在线计算）
+        # tec_grad_direction: [Batch, 2, H, W] - 预计算的梯度方向场
+        # 通过 TecGradientBank 离线预计算 + 余弦平方插值获得
+        # 仅用于物理损失约束，不参与前向传播的数值计算
 
-        if self.tec_cache is not None:
-            # 模式1：使用缓存 + 余弦平方插值
-            # 识别batch中所需的整点小时（floor 和 ceil）
-            time_floor = torch.floor(time).long()
-            time_ceil = torch.clamp(time_floor + 1, max=int(self.total_hours) - 1)
-
-            # 去重，获取所有需要的整点小时
-            hour_indices = torch.unique(torch.cat([time_floor, time_ceil]))
-
-            # 从缓存获取（或计算）TEC梯度方向
-            F_tec_dict, grad_direction_dict = self.tec_cache.get(
-                hour_indices.cpu().tolist(), self.tec_manager
-            )
-
-            # 使用余弦平方插值到查询时间
-            tec_grad_direction = self._interpolate_tec_gradient(grad_direction_dict, time)
-            # tec_grad_direction: [Batch, 2, H, W] - 插值后的梯度方向场
-
-        else:
-            # 模式2：向后兼容路径（旧版，直接处理唯一窗口）
-            # 验证必要参数已提供
-            if unique_tec_map_seq is None or tec_indices is None:
-                raise ValueError(
-                    "当 tec_cache 为 None 时，必须提供 unique_tec_map_seq 和 tec_indices 参数"
-                )
-
-            # ConvLSTM 处理唯一的时间窗口，不随 batch_size 增长
-            F_tec_unique = self.spatial_context_encoder(unique_tec_map_seq)
-            # F_tec_unique: [N_unique, tec_feat_dim, H, W]
-
-            # 提取 TEC 梯度方向（用于损失计算，不是调制）
-            tec_grad_direction_unique = self.tec_gradient_direction_head(F_tec_unique)
-            # tec_grad_direction_unique: [N_unique, 2, H, W] - (grad_lat, grad_lon)
-
-            # 简单索引映射（无插值）
-            tec_grad_direction = tec_grad_direction_unique[tec_indices]
-            # tec_grad_direction: [Batch, 2, H, W]
-
-        # A5. 空间分支不再使用 TEC 调制，直接使用原始 SIREN 输出
-        # 移除 FiLM 调制，TEC 仅通过损失函数约束梯度方向
+        # A3. 空间分支不使用 TEC 调制，直接使用原始 SIREN 输出
+        # TEC 仅通过物理损失函数约束梯度方向一致性
         h_spatial_mod = h_spatial  # [Batch, basis_dim] - 无调制
 
         # ==================== 分支 B: 时间分支 ====================
@@ -473,20 +349,19 @@ if __name__ == '__main__':
 
     sw_seq = torch.randn(batch_size, 6, 2).to(device)  # [Batch, Seq=6, 2]
 
-    # 模拟唯一时间窗口（假设 batch 中有 3 个唯一时间窗口）
-    n_unique = 3
-    unique_tec_map_seq = torch.rand(n_unique, 6, 1, 73, 73).to(device)  # [N_unique, Seq, 1, H, W]
-    tec_indices = torch.randint(0, n_unique, (batch_size,)).to(device)  # [Batch]
+    # 模拟预计算的 TEC 梯度方向（新架构）
+    tec_grad_direction = torch.randn(batch_size, 2, 73, 73).to(device)  # [Batch, 2, H, W]
+    # 归一化为单位向量
+    norm = torch.sqrt((tec_grad_direction ** 2).sum(dim=1, keepdim=True)) + 1e-8
+    tec_grad_direction = tec_grad_direction / norm
 
     print("\n输入形状:")
     print(f"  coords: {coords.shape}")
     print(f"  sw_seq: {sw_seq.shape}")
-    print(f"  unique_tec_map_seq: {unique_tec_map_seq.shape}")
-    print(f"  tec_indices: {tec_indices.shape}")
-    print(f"  唯一时间窗口数: {n_unique} (vs batch_size: {batch_size})")
+    print(f"  tec_grad_direction: {tec_grad_direction.shape}")
 
     # 前向传播
-    output, log_var, correction, extras = model(coords, sw_seq, unique_tec_map_seq, tec_indices)
+    output, log_var, correction, extras = model(coords, sw_seq, tec_grad_direction)
 
     print("\n输出形状:")
     print(f"  output: {output.shape}")
