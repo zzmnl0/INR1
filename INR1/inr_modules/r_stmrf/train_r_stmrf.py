@@ -104,8 +104,13 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device, con
         # 确保 coords 需要梯度（用于物理损失）
         coords.requires_grad_(True)
 
-        # 2. 前向传播（ConvLSTM 不随 batch_size 增长）
-        pred_ne, log_var, correction, extras = model(coords, sw_seq, unique_tec_map_seq, tec_indices)
+        # 2. 前向传播（支持两种模式：缓存优化 / 向后兼容）
+        if use_tec_cache:
+            # 多时间尺度优化：使用缓存，ConvLSTM只在整点小时运行
+            pred_ne, log_var, correction, extras = model(coords, sw_seq)
+        else:
+            # 向后兼容：直接处理唯一窗口（ConvLSTM不随batch增长）
+            pred_ne, log_var, correction, extras = model(coords, sw_seq, unique_tec_map_seq, tec_indices)
 
         # 3. 计算主损失（MSE 或 Huber）
         if config['use_uncertainty']:
@@ -201,8 +206,11 @@ def validate(model, val_loader, batch_processor, device, config):
             # 处理批次（识别唯一时间窗口）
             coords, target_ne, sw_seq, unique_tec_map_seq, tec_indices, target_tec_map = batch_processor.process_batch(batch_data)
 
-            # 前向传播（ConvLSTM 不随 batch_size 增长）
-            pred_ne, log_var, correction, extras = model(coords, sw_seq, unique_tec_map_seq, tec_indices)
+            # 前向传播（支持两种模式）
+            if use_tec_cache:
+                pred_ne, log_var, correction, extras = model(coords, sw_seq)
+            else:
+                pred_ne, log_var, correction, extras = model(coords, sw_seq, unique_tec_map_seq, tec_indices)
 
             # MSE 损失
             loss_mse = F.mse_loss(pred_ne, target_ne)
@@ -275,8 +283,8 @@ def train_r_stmrf(config):
         tec_map_path=config['tec_path'],
         total_hours=config['total_hours'],
         seq_len=config['seq_len'],
-        device=device,
-        downsample_factor=config.get('tec_downsample_factor', 4)  # 降采样以减少内存
+        device=device
+        # 保持原始分辨率73×73，不再使用降采样
     )
 
     # ==================== 2. 加载 IRI 神经代理 ====================
@@ -363,10 +371,35 @@ def train_r_stmrf(config):
         sw_manager=sw_manager,
         tec_manager=tec_manager,
         start_date_str=config['start_date_str'],
-        config=config
+        config=config,
+        tec_cache=None  # 先不传缓存，等模型创建后再初始化
     ).to(device)
 
     print(f"  模型参数量: {sum(p.numel() for p in model.parameters()):,}")
+
+    # ==================== 4.5. 初始化小时级TEC缓存（可选优化）====================
+    # 重要：必须在模型创建后初始化，以使用模型内部的 ConvLSTM 和梯度头
+    use_tec_cache = config.get('use_tec_cache', False)  # 默认关闭，保持向后兼容
+
+    if use_tec_cache:
+        print("\n[步骤 4.5] 初始化小时级TEC缓存（多时间尺度优化）...")
+        from .hourly_tec_cache import HourlyTECContextCache
+
+        # 使用模型内部的 ConvLSTM 和梯度头（参数共享！）
+        tec_cache = HourlyTECContextCache(
+            convlstm_encoder=model.spatial_context_encoder,
+            tec_gradient_head=model.tec_gradient_direction_head,
+            max_cache_size=config.get('tec_cache_size', 100),
+            device=device
+        )
+
+        # 将缓存绑定到模型
+        model.tec_cache = tec_cache
+
+        print(f"  ✓ TEC缓存初始化完成（最大缓存: {config.get('tec_cache_size', 100)} 小时）")
+        print(f"  ✓ ConvLSTM 将只在整点小时运行，使用余弦平方插值到分钟级")
+        print(f"  ✓ 缓存与模型参数共享，确保训练时一致性")
+        print(f"  ✓ 训练模式：跳过缓存（保留梯度）| 评估模式：启用缓存（加速推理）")
 
     # ==================== 5. 优化器和调度器 ====================
     print("\n[步骤 5] 配置优化器...")
@@ -422,6 +455,14 @@ def train_r_stmrf(config):
         print(f"    - MAE: {val_metrics['mae']:.6f}")
         print(f"    - RMSE: {val_metrics['rmse']:.6f}")
         print(f"    - R²: {val_metrics['r2']:.4f}")
+
+        # TEC缓存统计（如果启用）
+        if use_tec_cache and tec_cache is not None:
+            cache_stats = tec_cache.get_stats()
+            print(f"  TEC缓存统计:")
+            print(f"    - 命中率: {cache_stats['hit_rate']*100:.1f}% "
+                  f"({cache_stats['hits']}/{cache_stats['total_queries']})")
+            print(f"    - 缓存大小: {cache_stats['cache_size']}/{cache_stats['max_cache_size']}")
 
         # 学习率调度
         if scheduler is not None:

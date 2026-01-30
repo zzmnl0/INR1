@@ -41,17 +41,21 @@ CONFIG_R_STMRF = {
     # 职责: 提取 TEC 水平梯度方向的时序演化特征 F_TEC
     # 作用: 通过梯度方向一致性损失约束 Ne_fused，不参与数值预测
     #
+    # TEC 数据规格（保持原始分辨率）:
+    # - 原始: (720, 71, 73) - Time × Lat × Lon
+    # - Lat: -87.5 ~ 87.5, 步长 2.5° (71个点)
+    # - Lon: -180 ~ 180, 步长 5° (73个点)
+    # - 纬度填充后: (720, 73, 73) - 填充到 -90 ~ 90
+    #
     # 内存优化:
-    # 1. TEC 地图降采样 4x: 181×361 → 46×91（减少 16x 内存）
-    # 2. ConvLSTM 作用于区域级背景场，不随 batch_size 增长
+    # ConvLSTM 作用于区域级背景场，不随 batch_size 增长
     # 内存占用: N_unique * tec_feat_dim * tec_h * tec_w * 4 bytes（与 batch_size 无关！）
-    #   示例: 降采样后 46×91
-    #         10 * 16 * 46 * 91 * 4 = ~2.7 MB（极小，即使 N_unique=100 也只需 27 MB）
-    #         100 * 16 * 46 * 91 * 4 = ~27 MB（可接受，batch_size=2048 无压力）
-    'tec_downsample_factor': 4,  # TEC 地图降采样因子（181×361 → 46×91）
+    #   示例: 原始分辨率 73×73
+    #         10 * 16 * 73 * 73 * 4 = ~3.4 MB（极小，即使 N_unique=100 也只需 34 MB）
+    #         100 * 16 * 73 * 73 * 4 = ~34 MB（可接受，batch_size=2048 无压力）
     'tec_feat_dim': 16,  # ConvLSTM 输出通道数（梯度方向特征，无需太大）
-    'tec_h': 46,  # TEC 地图高度（降采样后）
-    'tec_w': 91,  # TEC 地图宽度（降采样后）
+    'tec_h': 73,  # TEC 地图高度（纬度填充后）
+    'tec_w': 73,  # TEC 地图宽度（原始）
     'convlstm_layers': 1,  # ConvLSTM 层数（简化，只需提取低频梯度方向）
     'convlstm_kernel': 3,  # ConvLSTM 卷积核大小
 
@@ -117,6 +121,10 @@ CONFIG_R_STMRF = {
 
     # ==================== TEC 梯度对齐参数 ====================
     'tec_gradient_threshold_percentile': 50.0,  # TEC 梯度显著性阈值（百分位数）
+
+    # ==================== 多时间尺度优化 ====================
+    'use_tec_cache': False,  # 是否启用小时级TEC缓存（默认关闭，保持向后兼容）
+    'tec_cache_size': 100,  # TEC 缓存最大小时数（启用缓存时有效）
 }
 
 
