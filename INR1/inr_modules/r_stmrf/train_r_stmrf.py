@@ -102,8 +102,13 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device, con
         # 1. 处理批次数据（获取序列，识别唯一时间窗口）
         coords, target_ne, sw_seq, unique_tec_map_seq, tec_indices, target_tec_map = batch_processor.process_batch(batch_data)
 
-        # 确保 coords 需要梯度（用于物理损失）
-        coords.requires_grad_(True)
+        # 判断是否需要计算物理损失（间歇性计算以加速训练）
+        physics_loss_freq = config.get('physics_loss_freq', 10)  # 默认每10个batch计算一次
+        compute_physics = (batch_idx % physics_loss_freq == 0)
+
+        # 只在需要物理损失时启用梯度
+        if compute_physics:
+            coords.requires_grad_(True)
 
         # 2. 前向传播（支持两种模式：缓存优化 / 向后兼容）
         if use_tec_cache:
@@ -123,19 +128,28 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device, con
             # 简单 MSE
             loss_main = F.mse_loss(pred_ne, target_ne)
 
-        # 4. 计算物理约束损失（新设计：使用梯度方向一致性）
-        loss_physics, physics_dict = combined_physics_loss(
-            pred_ne=pred_ne,
-            coords=coords,
-            tec_grad_direction=extras.get('tec_grad_direction'),  # 新设计
-            coords_normalized=extras.get('coords_normalized'),  # 新设计
-            w_chapman=config['w_chapman'],
-            w_tec_direction=config.get('w_tec_direction', 0.05),  # 新设计 - 梯度方向权重
-            target_tec_map=target_tec_map,  # 兼容旧设计
-            w_tec_align=config.get('w_tec_align', 0.0),  # 旧设计已弃用，设为 0
-            tec_lat_range=config['lat_range'],
-            tec_lon_range=config['lon_range']
-        )
+        # 4. 计算物理约束损失（间歇性计算）
+        if compute_physics:
+            loss_physics, physics_dict = combined_physics_loss(
+                pred_ne=pred_ne,
+                coords=coords,
+                tec_grad_direction=extras.get('tec_grad_direction'),  # 新设计
+                coords_normalized=extras.get('coords_normalized'),  # 新设计
+                w_chapman=config['w_chapman'],
+                w_tec_direction=config.get('w_tec_direction', 0.05),  # 新设计 - 梯度方向权重
+                target_tec_map=target_tec_map,  # 兼容旧设计
+                w_tec_align=config.get('w_tec_align', 0.0),  # 旧设计已弃用，设为 0
+                tec_lat_range=config['lat_range'],
+                tec_lon_range=config['lon_range']
+            )
+        else:
+            # 跳过物理损失计算，使用零损失
+            loss_physics = 0.0
+            physics_dict = {
+                'physics_total': 0.0,
+                'chapman': 0.0,
+                'tec_direction': 0.0
+            }
 
         # 5. 总损失
         loss = config['w_mse'] * loss_main + loss_physics
@@ -159,10 +173,11 @@ def train_one_epoch(model, train_loader, batch_processor, optimizer, device, con
         num_batches += 1
 
         # 更新进度条
+        physics_str = f"{physics_dict['physics_total']:.4f}" if compute_physics else "skip"
         pbar.set_postfix({
             'Loss': f"{loss.item():.4f}",
             'MSE': f"{loss_main.item():.4f}",
-            'Physics': f"{physics_dict['physics_total']:.4f}"
+            'Physics': physics_str
         })
 
     # 平均损失
@@ -424,6 +439,12 @@ def train_r_stmrf(config):
 
     # ==================== 6. 训练循环 ====================
     print("\n[步骤 6] 开始训练...")
+    physics_freq = config.get('physics_loss_freq', 10)
+    if physics_freq > 1:
+        print(f"  ⚡ 物理损失间歇性计算：每 {physics_freq} 个batch计算一次（加速训练）")
+        print(f"  ⚡ 预期加速: ~{physics_freq/2:.1f}× 梯度计算减少")
+    else:
+        print(f"  📊 物理损失每个batch计算（physics_loss_freq=1）")
     print(f"{'='*70}\n")
 
     train_losses = []
