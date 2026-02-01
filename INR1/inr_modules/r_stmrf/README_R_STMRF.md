@@ -4,7 +4,7 @@
 
 *最后更新: 2026-02-01*
 
-**版本**: v2.1.2（Bug 修复：torch.amp.autocast + 移除 target_tec_map）
+**版本**: v2.1.3（代码清理：移除所有弃用函数和参数）
 
 ---
 
@@ -877,6 +877,16 @@ v1.0 (FiLM 调制) 已被 v2.0 取代。如果确实需要：
 ---
 
 ## 更新日志
+
+### v2.1.3 (2026-02-01)
+- 🧹 **代码清理**: 移除所有弃用的类和函数
+  - 移除 ConvLSTM, ConvLSTMCell, SpatialContextEncoder（已被 TecGradientBank 替代）
+  - 移除 tec_gradient_alignment_loss_v2（已被 tec_gradient_direction_consistency_loss 替代）
+- 🧹 **配置清理**: 删除所有弃用的参数
+  - tec_feat_dim, convlstm_layers, convlstm_kernel, tec_h, tec_w
+  - w_tec_align, w_smooth, w_iri_dir, w_bkg_val
+- 📝 **文档更新**: 简化 print_config 输出，只显示当前使用的参数
+- ✅ **API 简化**: combined_physics_loss 只保留 v2.0+ 架构所需参数
 
 ### v2.1.2 (2026-02-01)
 - 🐛 **Bug 修复**: 修复 torch.cuda.amp.autocast 弃用警告（改用 torch.amp.autocast）

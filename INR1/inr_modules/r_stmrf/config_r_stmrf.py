@@ -46,13 +46,6 @@ CONFIG_R_STMRF = {
     # - ConvLSTM 已移除，使用 TecGradientBank 替代
     # - TEC 梯度方向通过 precompute_tec_gradient_bank.py 离线计算
     # - 训练时使用 memory-mapped loading + 时间插值
-    'tec_h': 73,  # TEC 地图高度（纬度填充后，保留用于物理损失）
-    'tec_w': 73,  # TEC 地图宽度（原始，保留用于物理损失）
-
-    # 已废弃参数（保留用于兼容性）
-    'tec_feat_dim': 16,  # [已废弃] ConvLSTM 输出通道数
-    'convlstm_layers': 1,  # [已废弃] ConvLSTM 层数
-    'convlstm_kernel': 3,  # [已废弃] ConvLSTM 卷积核大小
 
     # ==================== 训练超参数 ====================
     'batch_size': 2048,  # 批次大小（ConvLSTM 不随 batch 增长，可使用大 batch）
@@ -79,18 +72,12 @@ CONFIG_R_STMRF = {
     # 主损失
     'w_mse': 1.0,  # MSE 损失权重（或 Huber Loss）
 
-    # 物理约束损失（新设计）
+    # 物理约束损失（v2.0+ 架构）
     'w_chapman': 0.1,  # Chapman 垂直平滑损失权重
-    'w_tec_direction': 0.03,  # TEC 梯度方向一致性权重（新设计 - 取较小值避免过约束）
+    'w_tec_direction': 0.03,  # TEC 梯度方向一致性权重（取较小值避免过约束）
     'physics_loss_freq': 10,  # 物理损失计算频率（每N个batch计算一次，加速训练）
                                # 设为1表示每个batch都计算（无加速）
                                # 设为10表示每10个batch计算一次（推荐，2-3倍加速）
-
-    # 已弃用的损失（兼容性保留）
-    'w_tec_align': 0.0,  # 旧的 TEC 梯度对齐损失（已弃用，设为 0）
-    'w_smooth': 0.0,  # 额外的平滑约束（已弃用）
-    'w_iri_dir': 0.0,  # IRI 梯度方向一致性（已弃用）
-    'w_bkg_val': 0.0,  # 背景值正则化（已弃用）
 
     # ==================== 不确定性学习 ====================
     'use_uncertainty': True,  # 是否启用异方差损失
@@ -140,17 +127,16 @@ def print_config_r_stmrf():
 
     # 分类打印
     categories = {
-        '数据路径': ['fy_path', 'iri_proxy_path', 'sw_path', 'tec_path', 'save_dir'],
+        '数据路径': ['fy_path', 'iri_proxy_path', 'sw_path', 'tec_path', 'gradient_bank_path', 'save_dir'],
         '数据规格': ['total_hours', 'start_date_str', 'time_res', 'bin_size_hours'],
         '物理参数': ['lat_range', 'lon_range', 'alt_range'],
         '时序参数': ['seq_len'],
         'SIREN 架构': ['basis_dim', 'siren_hidden', 'siren_layers', 'omega_0'],
-        '循环网络': ['tec_feat_dim', 'tec_h', 'tec_w', 'convlstm_layers', 'convlstm_kernel',
-                      'env_hidden_dim', 'lstm_layers', 'lstm_dropout'],
-        '训练超参数': ['batch_size', 'lr', 'weight_decay', 'epochs', 'device', 'num_workers'],
+        '循环网络': ['env_hidden_dim', 'lstm_layers', 'lstm_dropout'],
+        '训练超参数': ['batch_size', 'lr', 'weight_decay', 'epochs', 'device', 'num_workers', 'use_memmap'],
         '学习率调度': ['scheduler_type', 'warmup_epochs', 'min_lr'],
         '数据划分': ['val_days', 'val_ratio'],
-        '损失权重': ['w_mse', 'w_chapman', 'w_tec_align', 'w_smooth', 'w_iri_dir', 'w_bkg_val',
+        '损失权重': ['w_mse', 'w_chapman', 'w_tec_direction', 'physics_loss_freq',
                      'use_uncertainty', 'uncertainty_weight'],
         '其他': ['save_interval', 'save_best_only', 'plot_interval', 'early_stopping',
                  'patience', 'grad_clip', 'use_amp'],

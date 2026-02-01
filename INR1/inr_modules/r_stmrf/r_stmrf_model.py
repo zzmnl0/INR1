@@ -69,11 +69,6 @@ class R_STMRF_Model(nn.Module):
         self.siren_layers = config.get('siren_layers', 3)
         self.omega_0 = config.get('omega_0', 30.0)
 
-        # TEC 特征维度和地图尺寸
-        self.tec_feat_dim = config.get('tec_feat_dim', 32)
-        self.tec_h = config.get('tec_h', 181)
-        self.tec_w = config.get('tec_w', 361)
-
         # 环境特征维度
         self.env_hidden_dim = config.get('env_hidden_dim', 64)
 
@@ -305,9 +300,6 @@ if __name__ == '__main__':
         'siren_hidden': 128,
         'siren_layers': 3,
         'omega_0': 30.0,
-        'tec_feat_dim': 32,
-        'tec_h': 181,
-        'tec_w': 361,
         'env_hidden_dim': 64,
     }
 

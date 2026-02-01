@@ -3,9 +3,9 @@ R-STMRF 物理约束损失函数
 
 物理约束损失：
     1. Chapman 垂直平滑损失（垂直方向二阶导数约束）
-    2. TEC 梯度方向一致性损失（新设计 - 仅约束方向，不约束幅值）
+    2. TEC 梯度方向一致性损失（v2.0+ - 仅约束方向，不约束幅值）
 
-新设计理念：
+设计理念：
     - TEC 仅作为"时序水平梯度方向约束"
     - 不约束 TEC 幅值，不要求 Ne 积分等于 TEC
     - 仅要求 Ne_fused 的水平变化方向不与 TEC 主导方向相矛盾
@@ -90,124 +90,6 @@ def chapman_smoothness_loss(pred_ne, coords, alt_idx=2, weight_second_order=1.0)
     return total_loss
 
 
-def tec_gradient_alignment_loss_v2(pred_ne, coords, target_tec_map,
-                                     tec_lat_range=(-90, 90), tec_lon_range=(-180, 180),
-                                     threshold_percentile=50.0):
-    """
-    TEC 水平梯度对齐损失（改进版）
-
-    约束预测 Ne 的水平梯度方向与真值 TEC 地图的水平梯度方向一致。
-
-    改进点：
-        - 直接使用 TEC 地图计算梯度（而非单点采样）
-        - 使用 Sobel 算子计算空间梯度
-        - 自适应掩码（只在梯度显著区域应用约束）
-
-    Args:
-        pred_ne: 预测 Ne 值 [Batch, 1]
-        coords: 坐标 [Batch, 4] (Lat, Lon, Alt, Time)，requires_grad=True
-        target_tec_map: 真值 TEC 地图 [Batch, 1, H, W]（当前时刻）
-        tec_lat_range: TEC 地图纬度范围
-        tec_lon_range: TEC 地图经度范围
-        threshold_percentile: 梯度显著性阈值（百分位数）
-
-    Returns:
-        scalar loss
-    """
-    batch_size = pred_ne.shape[0]
-    device = pred_ne.device
-
-    # ==================== 1. 计算 Ne 对 Lat/Lon 的梯度 ====================
-    grad_ne = torch.autograd.grad(
-        outputs=pred_ne,
-        inputs=coords,
-        grad_outputs=torch.ones_like(pred_ne),
-        create_graph=True,
-        retain_graph=True,
-        only_inputs=True
-    )[0]  # [Batch, 4]
-
-    # 提取水平梯度 (Lat, Lon)
-    grad_ne_lat = grad_ne[:, 0]  # [Batch]
-    grad_ne_lon = grad_ne[:, 1]  # [Batch]
-
-    vec_ne = torch.stack([grad_ne_lat, grad_ne_lon], dim=-1)  # [Batch, 2]
-
-    # ==================== 2. 计算 TEC 地图的水平梯度 ====================
-    # 使用 Sobel 算子计算空间梯度
-    # Sobel X (经度方向)
-    sobel_x = torch.tensor([
-        [-1, 0, 1],
-        [-2, 0, 2],
-        [-1, 0, 1]
-    ], dtype=torch.float32, device=device).view(1, 1, 3, 3)
-
-    # Sobel Y (纬度方向)
-    sobel_y = torch.tensor([
-        [-1, -2, -1],
-        [ 0,  0,  0],
-        [ 1,  2,  1]
-    ], dtype=torch.float32, device=device).view(1, 1, 3, 3)
-
-    # 计算梯度图
-    grad_tec_lat = F.conv2d(target_tec_map, sobel_y, padding=1)  # [Batch, 1, H, W]
-    grad_tec_lon = F.conv2d(target_tec_map, sobel_x, padding=1)  # [Batch, 1, H, W]
-
-    # ==================== 3. 从 TEC 梯度图中采样到查询点 ====================
-    # 归一化坐标到 [-1, 1]
-    lat_coords = coords[:, 0]  # [Batch]
-    lon_coords = coords[:, 1]  # [Batch]
-
-    lat_norm = (lat_coords - tec_lat_range[0]) / (tec_lat_range[1] - tec_lat_range[0]) * 2.0 - 1.0
-    lon_norm = (lon_coords - tec_lon_range[0]) / (tec_lon_range[1] - tec_lon_range[0]) * 2.0 - 1.0
-
-    grid_coords = torch.stack([lon_norm, lat_norm], dim=-1)  # [Batch, 2]
-    grid_coords = grid_coords.view(batch_size, 1, 1, 2)  # [Batch, 1, 1, 2]
-
-    # 采样 TEC 梯度
-    sampled_grad_lat = F.grid_sample(
-        grad_tec_lat, grid_coords,
-        mode='bilinear',
-        padding_mode='border',
-        align_corners=True
-    ).squeeze(-1).squeeze(-1).squeeze(-1)  # [Batch]
-
-    sampled_grad_lon = F.grid_sample(
-        grad_tec_lon, grid_coords,
-        mode='bilinear',
-        padding_mode='border',
-        align_corners=True
-    ).squeeze(-1).squeeze(-1).squeeze(-1)  # [Batch]
-
-    vec_tec = torch.stack([sampled_grad_lat, sampled_grad_lon], dim=-1)  # [Batch, 2]
-
-    # ==================== 4. 计算余弦相似度 ====================
-    # 切断 TEC 梯度的反向传播（只作为监督信号）
-    vec_tec_detached = vec_tec.detach()
-
-    cosine_sim = F.cosine_similarity(vec_ne, vec_tec_detached, dim=1, eps=1e-8)  # [Batch]
-
-    # ==================== 5. 自适应掩码（只在梯度显著处应用） ====================
-    # 计算 TEC 梯度幅值
-    tec_grad_mag = torch.norm(vec_tec_detached, dim=1)  # [Batch]
-
-    # 动态阈值（百分位数）
-    threshold = torch.quantile(tec_grad_mag, threshold_percentile / 100.0)
-    mask = (tec_grad_mag > threshold).float()
-
-    # ==================== 6. 加权损失 ====================
-    # 损失：1 - cosine_similarity（最大化相似度）
-    loss_per_sample = 1.0 - cosine_sim
-
-    # 应用掩码
-    if mask.sum() > 0:
-        loss = (loss_per_sample * mask).sum() / (mask.sum() + 1e-6)
-    else:
-        loss = loss_per_sample.mean()
-
-    return loss
-
-
 def tec_gradient_direction_consistency_loss(pred_ne, coords, tec_grad_direction, coords_normalized):
     """
     TEC 梯度方向一致性损失（新设计 - 仅约束方向，不约束幅值）
@@ -279,40 +161,42 @@ def tec_gradient_direction_consistency_loss(pred_ne, coords, tec_grad_direction,
 
 def combined_physics_loss(pred_ne, coords, tec_grad_direction=None, coords_normalized=None,
                            w_chapman=0.1, w_tec_direction=0.05,
-                           target_tec_map=None, w_tec_align=0.0,
                            tec_lat_range=(-90, 90), tec_lon_range=(-180, 180)):
     """
-    组合物理约束损失（新设计）
+    组合物理约束损失（v2.0+ 架构）
 
     物理约束：
         1. Chapman 垂直平滑（二阶导数约束）
-        2. TEC 梯度方向一致性（新设计 - 仅约束方向，不约束幅值）
+        2. TEC 梯度方向一致性（仅约束方向，不约束幅值）
 
-    禁止的做法：
-        - 不使用 TEC 幅值回归损失
+    设计原则：
+        - TEC 仅作为梯度方向引导，不约束数值
         - 不强制 Ne 积分等于观测 TEC
-        - 不将 ConvLSTM 输出解释为电子密度或 TEC 预测
+        - 适用于高度覆盖不完整的场景
 
     Args:
-        pred_ne: 预测 Ne_fused 值 [Batch, 1]（IRI + SIREN）
-        coords: 坐标 [Batch, 4] (requires_grad=True)
-        tec_grad_direction: TEC 梯度方向场 [Batch, 2, H, W] (新设计)
-        coords_normalized: 归一化坐标 [Batch, 2] (新设计)
-        w_chapman: Chapman 损失权重
-        w_tec_direction: TEC 方向一致性损失权重（新设计 - 取较小值，避免过约束）
-        target_tec_map: TEC 地图 [Batch, 1, H, W] (旧设计，已弃用)
-        w_tec_align: TEC 对齐损失权重（旧设计，设为 0）
-        tec_lat_range: TEC 纬度范围
-        tec_lon_range: TEC 经度范围
+        pred_ne: 预测 Ne_fused 值 [Batch, 1]（IRI背景 + SIREN残差）
+        coords: 坐标 [Batch, 4] (Lat, Lon, Alt, Time), requires_grad=True
+        tec_grad_direction: TEC 梯度方向场 [Batch, 2, H, W]
+                           通过 TecGradientBank 预计算获得
+        coords_normalized: 归一化坐标 [Batch, 2] (lat_n, lon_n)
+                          用于从 tec_grad_direction 采样
+        w_chapman: Chapman 垂直平滑损失权重
+        w_tec_direction: TEC 梯度方向一致性权重（建议: 0.01-0.05）
+        tec_lat_range: TEC 数据纬度范围（用于坐标归一化）
+        tec_lon_range: TEC 数据经度范围（用于坐标归一化）
 
     Returns:
-        total_loss: scalar
+        total_loss: scalar，加权总损失
         loss_dict: 各项损失的字典
+            - chapman: Chapman 垂直平滑损失
+            - tec_direction: TEC 梯度方向一致性损失
+            - physics_total: 总物理损失
     """
     # 1. Chapman 垂直平滑
     loss_chapman = chapman_smoothness_loss(pred_ne, coords, alt_idx=2)
 
-    # 2. TEC 梯度方向一致性（新设计）
+    # 2. TEC 梯度方向一致性（v2.0+ 架构）
     if tec_grad_direction is not None and coords_normalized is not None:
         loss_tec_direction = tec_gradient_direction_consistency_loss(
             pred_ne, coords, tec_grad_direction, coords_normalized
@@ -320,24 +204,13 @@ def combined_physics_loss(pred_ne, coords, tec_grad_direction=None, coords_norma
     else:
         loss_tec_direction = torch.tensor(0.0, device=pred_ne.device)
 
-    # 3. 旧的 TEC 对齐损失（已弃用，保留兼容性）
-    if w_tec_align > 0 and target_tec_map is not None:
-        loss_tec_align = tec_gradient_alignment_loss_v2(
-            pred_ne, coords, target_tec_map,
-            tec_lat_range, tec_lon_range
-        )
-    else:
-        loss_tec_align = torch.tensor(0.0, device=pred_ne.device)
-
     # 总损失
     total_loss = (w_chapman * loss_chapman +
-                  w_tec_direction * loss_tec_direction +
-                  w_tec_align * loss_tec_align)
+                  w_tec_direction * loss_tec_direction)
 
     loss_dict = {
         'chapman': loss_chapman.item(),
         'tec_direction': loss_tec_direction.item() if isinstance(loss_tec_direction, torch.Tensor) else 0.0,
-        'tec_align': loss_tec_align.item() if isinstance(loss_tec_align, torch.Tensor) else 0.0,
         'physics_total': total_loss.item()
     }
 
@@ -363,27 +236,35 @@ if __name__ == '__main__':
     # 模拟模型输出
     pred_ne = torch.randn(batch_size, 1, requires_grad=True, device=device) + 11.0
 
-    # 模拟 TEC 地图
-    target_tec_map = torch.rand(batch_size, 1, 181, 361, device=device)
+    # 模拟 TEC 梯度方向（预计算）
+    tec_grad_direction = torch.randn(batch_size, 2, 73, 73, device=device)
+    # 归一化为单位向量
+    norm = torch.sqrt((tec_grad_direction ** 2).sum(dim=1, keepdim=True)) + 1e-8
+    tec_grad_direction = tec_grad_direction / norm
+
+    # 模拟归一化坐标
+    coords_normalized = torch.randn(batch_size, 2, device=device)
 
     # 测试 Chapman 损失
     print("\n[测试 1] Chapman Smoothness Loss")
     loss_chapman = chapman_smoothness_loss(pred_ne, coords, alt_idx=2)
     print(f"  Chapman Loss: {loss_chapman.item():.6f}")
 
-    # 测试 TEC 梯度对齐损失
-    print("\n[测试 2] TEC Gradient Alignment Loss V2")
-    loss_tec = tec_gradient_alignment_loss_v2(
-        pred_ne, coords, target_tec_map,
-        tec_lat_range=(-90, 90), tec_lon_range=(-180, 180)
+    # 测试 TEC 梯度方向一致性损失
+    print("\n[测试 2] TEC Gradient Direction Consistency Loss")
+    loss_tec = tec_gradient_direction_consistency_loss(
+        pred_ne, coords, tec_grad_direction, coords_normalized
     )
-    print(f"  TEC Alignment Loss: {loss_tec.item():.6f}")
+    print(f"  TEC Direction Loss: {loss_tec.item():.6f}")
 
     # 测试组合损失
     print("\n[测试 3] Combined Physics Loss")
     total_loss, loss_dict = combined_physics_loss(
-        pred_ne, coords, target_tec_map,
-        w_chapman=0.1, w_tec_align=0.05
+        pred_ne, coords,
+        tec_grad_direction=tec_grad_direction,
+        coords_normalized=coords_normalized,
+        w_chapman=0.1,
+        w_tec_direction=0.05
     )
     print(f"  Total Physics Loss: {total_loss.item():.6f}")
     for key, val in loss_dict.items():

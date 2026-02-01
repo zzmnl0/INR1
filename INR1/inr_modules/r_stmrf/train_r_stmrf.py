@@ -139,11 +139,10 @@ def train_one_epoch(model, train_loader, batch_processor, gradient_bank, optimiz
             loss_physics, physics_dict = combined_physics_loss(
                 pred_ne=pred_ne,
                 coords=coords,
-                tec_grad_direction=extras.get('tec_grad_direction'),  # 新设计
-                coords_normalized=extras.get('coords_normalized'),  # 新设计
+                tec_grad_direction=extras.get('tec_grad_direction'),
+                coords_normalized=extras.get('coords_normalized'),
                 w_chapman=config['w_chapman'],
-                w_tec_direction=config.get('w_tec_direction', 0.05),  # 新设计 - 梯度方向权重
-                w_tec_align=config.get('w_tec_align', 0.0),  # 旧设计已弃用，设为 0
+                w_tec_direction=config.get('w_tec_direction', 0.05),
                 tec_lat_range=config['lat_range'],
                 tec_lon_range=config['lon_range']
             )
