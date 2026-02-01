@@ -47,7 +47,7 @@ def chapman_smoothness_loss(pred_ne, coords, alt_idx=2, weight_second_order=1.0)
 
     # ⚠️ 关键修复：禁用AMP以避免二阶导数计算时的数值溢出
     # 二阶导数对精度非常敏感，必须使用float32
-    with torch.cuda.amp.autocast(enabled=False):
+    with torch.amp.autocast('cuda', enabled=False):
         # 确保所有输入都是float32
         pred_ne_fp32 = pred_ne.float()
         coords_fp32 = coords.float()

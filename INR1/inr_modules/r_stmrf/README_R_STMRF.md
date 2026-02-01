@@ -2,9 +2,9 @@
 
 **Recurrent Spatio-Temporal Modulated Residual Field for Ionospheric Electron Density Reconstruction**
 
-*最后更新: 2026-01-30*
+*最后更新: 2026-02-01*
 
-**版本**: v2.1.1（多时间尺度优化 + 间歇性物理损失）
+**版本**: v2.1.2（Bug 修复：torch.amp.autocast + 移除 target_tec_map）
 
 ---
 
@@ -877,6 +877,11 @@ v1.0 (FiLM 调制) 已被 v2.0 取代。如果确实需要：
 ---
 
 ## 更新日志
+
+### v2.1.2 (2026-02-01)
+- 🐛 **Bug 修复**: 修复 torch.cuda.amp.autocast 弃用警告（改用 torch.amp.autocast）
+- 🐛 **Bug 修复**: 移除未定义的 target_tec_map 引用（旧架构遗留）
+- 🔧 **代码清理**: 更新 collate_with_sequences 函数以匹配新架构
 
 ### v2.0 (2026-01-29)
 - 🔄 **重大架构变更**: TEC 从数值调制改为梯度方向约束

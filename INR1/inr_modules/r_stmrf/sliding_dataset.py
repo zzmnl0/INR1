@@ -122,6 +122,8 @@ def collate_with_sequences(batch, sw_manager, tec_manager, device='cuda'):
 
     如果希望在 DataLoader 层面整合序列数据，可以使用此函数作为 collate_fn
 
+    注意：新架构中，TEC 梯度通过 TecGradientBank 离线预计算，不再在此处加载
+
     Args:
         batch: List of samples from Dataset
         sw_manager: SpaceWeatherManager
@@ -136,14 +138,12 @@ def collate_with_sequences(batch, sw_manager, tec_manager, device='cuda'):
 
     # 使用批次处理器
     processor = SlidingWindowBatchProcessor(sw_manager, tec_manager, device)
-    coords, target_ne, sw_seq, tec_map_seq, target_tec_map = processor.process_batch(batch_data)
+    coords, target_ne, sw_seq = processor.process_batch(batch_data)
 
     return {
         'coords': coords,
         'target_ne': target_ne,
-        'sw_seq': sw_seq,
-        'tec_map_seq': tec_map_seq,
-        'target_tec_map': target_tec_map
+        'sw_seq': sw_seq
     }
 
 

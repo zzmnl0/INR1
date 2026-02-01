@@ -119,7 +119,7 @@ def train_one_epoch(model, train_loader, batch_processor, gradient_bank, optimiz
             coords.requires_grad_(True)
 
         # 3. 前向传播（支持AMP）
-        with torch.cuda.amp.autocast(enabled=use_amp):
+        with torch.amp.autocast('cuda', enabled=use_amp):
             pred_ne, log_var, correction, extras = model(coords, sw_seq, tec_grad_direction)
 
             # 3. 计算主损失（MSE 或 Huber）
@@ -143,7 +143,6 @@ def train_one_epoch(model, train_loader, batch_processor, gradient_bank, optimiz
                 coords_normalized=extras.get('coords_normalized'),  # 新设计
                 w_chapman=config['w_chapman'],
                 w_tec_direction=config.get('w_tec_direction', 0.05),  # 新设计 - 梯度方向权重
-                target_tec_map=target_tec_map,  # 兼容旧设计
                 w_tec_align=config.get('w_tec_align', 0.0),  # 旧设计已弃用，设为 0
                 tec_lat_range=config['lat_range'],
                 tec_lon_range=config['lon_range']
