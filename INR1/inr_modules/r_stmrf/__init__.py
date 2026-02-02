@@ -5,7 +5,7 @@ R-STMRF (Recurrent Spatio-Temporal Modulated Residual Field) Module
 """
 
 from .siren_layers import SIRENLayer, SIRENNet
-from .recurrent_parts import GlobalEnvEncoder, SpatialContextEncoder
+from .recurrent_parts import GlobalEnvEncoder
 from .r_stmrf_model import R_STMRF_Model
 
 __all__ = [
