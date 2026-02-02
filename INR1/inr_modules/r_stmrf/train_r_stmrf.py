@@ -553,7 +553,7 @@ def train_r_stmrf(config):
     print(f"最佳验证损失: {best_val_loss:.6f}")
     print(f"{'='*70}\n")
 
-    return model, train_losses, val_losses, train_loader, val_loader, sw_manager, tec_manager
+    return model, train_losses, val_losses, train_loader, val_loader, sw_manager, tec_manager, gradient_bank, batch_processor
 
 
 # ======================== 主函数 ========================
