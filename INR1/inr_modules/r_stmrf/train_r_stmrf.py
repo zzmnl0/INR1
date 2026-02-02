@@ -39,22 +39,32 @@ class SubsetTimeBinSampler(TimeBinSampler):
     TimeBinSampler 的 Subset 版本
 
     用于在 random_split 之后仍然使用时间分箱策略
+
+    关键修复：将原始数据集的绝对索引转换为 Subset 的相对索引
     """
     def __init__(self, subset: Subset, batch_size: int, shuffle: bool = True, drop_last: bool = False):
         # 获取底层的 FY3D_Dataset
         base_dataset = subset.dataset
         subset_indices = subset.indices
 
+        # 创建从原始索引到 Subset 相对索引的映射
+        # 例如：subset.indices = [100, 200, 300] -> {100: 0, 200: 1, 300: 2}
+        original_to_subset_idx = {orig_idx: subset_idx
+                                  for subset_idx, orig_idx in enumerate(subset_indices)}
+
         # 构建 Subset 的 indices_by_bin
-        # 只保留在 subset 中的索引
-        subset_indices_set = set(subset_indices)
+        # 只保留在 subset 中的索引，并转换为相对索引
         filtered_indices_by_bin = {}
 
         for bin_id, indices in base_dataset.indices_by_bin.items():
-            # 过滤出在 subset 中的索引
-            filtered_indices = np.array([idx for idx in indices if idx in subset_indices_set])
+            # 过滤出在 subset 中的索引，并转换为 Subset 的相对索引
+            filtered_indices = []
+            for idx in indices:
+                if idx in original_to_subset_idx:
+                    filtered_indices.append(original_to_subset_idx[idx])
+
             if len(filtered_indices) > 0:
-                filtered_indices_by_bin[bin_id] = filtered_indices
+                filtered_indices_by_bin[bin_id] = np.array(filtered_indices)
 
         # 创建一个临时的 dataset 对象，只用于存储 indices_by_bin
         class TempDataset:
