@@ -106,24 +106,26 @@ def main():
     print("\n[3.3] 绘制高度剖面...")
     from inr_modules.r_stmrf.evaluation_r_stmrf import plot_r_stmrf_altitude_profile
 
-    # 选择几个代表性时刻
-    target_times = [
-        (0, 0),   # Day 0, Hour 0
-        (10, 12), # Day 10, Hour 12
-        (20, 6),  # Day 20, Hour 6
-    ]
+    # 从配置读取可视化参数
+    plot_days = config.get('plot_days', [5, 15, 25])
+    plot_hours = config.get('plot_hours', [0.0, 6.0, 12.0, 18.0])
 
-    for day, hour in target_times:
-        plot_r_stmrf_altitude_profile(
-            model=model,
-            sw_manager=sw_manager,
-            gradient_bank=gradient_bank,
-            device=device,
-            target_day=day,
-            target_hour=hour,
-            save_dir=config['save_dir'],
-            config=config
-        )
+    print(f"  绘制时刻: 天数={plot_days}, 小时={plot_hours}")
+    print(f"  共生成 {len(plot_days) * len(plot_hours)} 个高度剖面图")
+
+    # 生成所有 (day, hour) 组合
+    for day in plot_days:
+        for hour in plot_hours:
+            plot_r_stmrf_altitude_profile(
+                model=model,
+                sw_manager=sw_manager,
+                gradient_bank=gradient_bank,
+                device=device,
+                target_day=day,
+                target_hour=hour,
+                save_dir=config['save_dir'],
+                config=config
+            )
 
     # ==================== 4. 完成 ====================
     print("\n" + "="*70)
