@@ -2,9 +2,9 @@
 
 **Recurrent Spatio-Temporal Modulated Residual Field for Ionospheric Electron Density Reconstruction**
 
-*最后更新: 2026-02-01*
+*最后更新: 2026-02-02*
 
-**版本**: v2.1.3（代码清理：移除所有弃用函数和参数）
+**版本**: v2.2.0（不确定性学习优化：Warm-up + 三视图监控）
 
 ---
 
@@ -877,6 +877,28 @@ v1.0 (FiLM 调制) 已被 v2.0 取代。如果确实需要：
 ---
 
 ## 更新日志
+
+### v2.2.0 (2026-02-02)
+- 🔥 **不确定性 Warm-up**: 前 N 个 epoch 关闭异方差损失，只用 MSE+物理损失
+  - 先让模型学会"预测准确"，再学会"预测方差"
+  - 防止模型通过调整方差作弊（降低 loss 但不提高精度）
+  - 可配置：`uncertainty_warmup_epochs: 5`（默认）
+- 🛡️ **log_var 约束**: clamp + L2 正则化，防止方差崩塌
+  - 硬限制：`log_var ∈ [-10, 10]`
+  - 软约束：`L2 regularization = 0.001 * (log_var)²`
+  - 鼓励方差接近 1，避免极端值
+- 📊 **三视图训练监控**: 分离展示精度、优化和物理约束
+  - Top Panel: Pure MSE（精度，Log Scale）
+  - Middle Panel: Total Loss & NLL（优化，Linear Scale，可为负）
+  - Bottom Panel: Physics Constraints（物理，Log Scale）
+  - 实时更新，每个 epoch 绘制
+- 💾 **持久化历史**: 训练历史保存为 `training_history.json`
+  - 包含所有损失分项
+  - 方便后续分析和重绘
+- ✅ **纯 MSE 监控**: 始终计算纯 MSE（不受不确定性影响）
+  - 用于精度评估
+  - 与验证集 MSE 对比
+  - 防止误判模型性能
 
 ### v2.1.3 (2026-02-01)
 - 🧹 **代码清理**: 移除所有弃用的类和函数
