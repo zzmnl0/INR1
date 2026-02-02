@@ -35,7 +35,7 @@ def main():
     print("阶段 1: 模型训练")
     print("="*70 + "\n")
 
-    model, train_losses, val_losses, train_loader, val_loader, sw_manager, tec_manager = train_r_stmrf(config)
+    model, train_losses, val_losses, train_loader, val_loader, sw_manager, tec_manager, gradient_bank, batch_processor = train_r_stmrf(config)
 
     device = torch.device(config['device'])
 
@@ -52,8 +52,18 @@ def main():
     else:
         print("⚠️  警告: 未找到最佳模型，使用当前模型")
 
-    # TODO: 实现详细评估（可复用原有的 evaluate_and_save_report）
-    print("详细评估功能待实现...")
+    # 详细评估
+    print("\n[2.1] 计算详细评估指标...")
+    from inr_modules.r_stmrf.evaluation_r_stmrf import evaluate_r_stmrf_model
+    evaluate_r_stmrf_model(
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        batch_processor=batch_processor,
+        gradient_bank=gradient_bank,
+        device=device,
+        save_dir=config['save_dir']
+    )
 
     # ==================== 3. 可视化结果 ====================
     print("\n" + "="*70)
@@ -79,8 +89,41 @@ def main():
     plt.close()
     print(f"  ✓ 损失曲线已保存: {loss_curve_path}")
 
-    # TODO: 实现 Parity 图和高度剖面（可复用原有函数）
-    print("\n[3.2] Parity 图和高度剖面功能待实现...")
+    # Parity 图（散点图和密度图）
+    print("\n[3.2] 绘制 Parity 图...")
+    from inr_modules.r_stmrf.evaluation_r_stmrf import plot_r_stmrf_parity
+    plot_r_stmrf_parity(
+        model=model,
+        val_loader=val_loader,
+        batch_processor=batch_processor,
+        gradient_bank=gradient_bank,
+        device=device,
+        save_dir=config['save_dir'],
+        config=config
+    )
+
+    # 高度剖面可视化
+    print("\n[3.3] 绘制高度剖面...")
+    from inr_modules.r_stmrf.evaluation_r_stmrf import plot_r_stmrf_altitude_profile
+
+    # 选择几个代表性时刻
+    target_times = [
+        (0, 0),   # Day 0, Hour 0
+        (10, 12), # Day 10, Hour 12
+        (20, 6),  # Day 20, Hour 6
+    ]
+
+    for day, hour in target_times:
+        plot_r_stmrf_altitude_profile(
+            model=model,
+            sw_manager=sw_manager,
+            gradient_bank=gradient_bank,
+            device=device,
+            target_day=day,
+            target_hour=hour,
+            save_dir=config['save_dir'],
+            config=config
+        )
 
     # ==================== 4. 完成 ====================
     print("\n" + "="*70)
@@ -89,9 +132,16 @@ def main():
     print("="*70 + "\n")
 
     print("生成的文件:")
-    print("  - best_r_stmrf_model.pth        (最佳模型权重)")
-    print("  - loss_curve_r_stmrf.png        (损失曲线)")
-    print("  - r_stmrf_epoch_*.pth           (定期保存的检查点)")
+    print("  [模型权重]")
+    print("    - best_r_stmrf_model.pth          (最佳模型权重)")
+    print("    - r_stmrf_epoch_*.pth             (定期保存的检查点)")
+    print("  [评估报告]")
+    print("    - r_stmrf_evaluation_report.txt   (详细评估指标)")
+    print("  [可视化图表]")
+    print("    - loss_curve_r_stmrf.png          (训练/验证损失曲线)")
+    print("    - parity_scatter_r_stmrf.png      (Parity 散点图)")
+    print("    - parity_density_r_stmrf.png      (Parity 密度图)")
+    print("    - altitude_profile_*.png          (高度剖面切片图)")
     print()
 
 
