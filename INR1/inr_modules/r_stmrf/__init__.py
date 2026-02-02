@@ -12,6 +12,5 @@ __all__ = [
     'SIRENLayer',
     'SIRENNet',
     'GlobalEnvEncoder',
-    'SpatialContextEncoder',
     'R_STMRF_Model',
 ]

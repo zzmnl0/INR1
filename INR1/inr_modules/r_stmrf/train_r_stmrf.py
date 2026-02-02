@@ -24,11 +24,11 @@ parent_dir = os.path.dirname(current_dir)
 if parent_dir not in sys.path:
     sys.path.append(parent_dir)
 
-from config_r_stmrf import get_config_r_stmrf, print_config_r_stmrf
-from r_stmrf_model import R_STMRF_Model
-from physics_losses_r_stmrf import combined_physics_loss
-from sliding_dataset import SlidingWindowBatchProcessor
-from tec_gradient_bank import TecGradientBank
+from .config_r_stmrf import get_config_r_stmrf, print_config_r_stmrf
+from .r_stmrf_model import R_STMRF_Model
+from .physics_losses_r_stmrf import combined_physics_loss
+from .sliding_dataset import SlidingWindowBatchProcessor
+from .tec_gradient_bank import TecGradientBank
 
 from data_managers import SpaceWeatherManager, TECDataManager, IRINeuralProxy
 from data_managers.FY_dataloader import FY3D_Dataset, TimeBinSampler

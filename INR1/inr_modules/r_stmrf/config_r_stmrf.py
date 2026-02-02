@@ -51,7 +51,7 @@ CONFIG_R_STMRF = {
     'batch_size': 2048,  # 批次大小（ConvLSTM 不随 batch 增长，可使用大 batch）
     'lr': 3e-4,  # 学习率
     'weight_decay': 1e-4,  # 权重衰减
-    'epochs': 50,  # 训练轮数
+    'epochs': 2,  # 训练轮数
     'seed': 42,
     'device': 'cuda' if torch.cuda.is_available() else 'cpu',
     'num_workers': 0,  # DataLoader 工作进程数
@@ -75,7 +75,7 @@ CONFIG_R_STMRF = {
     # 物理约束损失（v2.0+ 架构）
     'w_chapman': 0.1,  # Chapman 垂直平滑损失权重
     'w_tec_direction': 0.03,  # TEC 梯度方向一致性权重（取较小值避免过约束）
-    'physics_loss_freq': 10,  # 物理损失计算频率（每N个batch计算一次，加速训练）
+    'physics_loss_freq': 5,  # 物理损失计算频率（每N个batch计算一次，加速训练）
                                # 设为1表示每个batch都计算（无加速）
                                # 设为10表示每10个batch计算一次（推荐，2-3倍加速）
 
@@ -89,17 +89,17 @@ CONFIG_R_STMRF = {
     'log_var_regularization': 0.001,  # log_var 正则化权重（惩罚极端方差，鼓励接近 1）
 
     # ==================== 模型保存 ====================
-    'save_interval': 5,  # 每隔多少个 epoch 保存一次模型
+    'save_interval': 2,  # 每隔多少个 epoch 保存一次模型
     'save_best_only': True,  # 是否只保存最佳模型
 
     # ==================== 可视化 ====================
-    'plot_interval': 10,  # 每隔多少个 epoch 绘制可视化
+    'plot_interval': 2,  # 每隔多少个 epoch 绘制可视化
     'plot_days': [5, 15, 25],  # 绘制哪些天的高度剖面
     'plot_hours': [0.0, 6.0, 12.0, 18.0],  # 绘制哪些时刻
 
     # ==================== 早停 ====================
     'early_stopping': True,  # 是否启用早停
-    'patience': 10,  # 早停耐心值（验证损失不下降的轮数）
+    'patience': 5,  # 早停耐心值（验证损失不下降的轮数）
 
     # ==================== 梯度裁剪 ====================
     'grad_clip': 1.0,  # 梯度裁剪阈值（设为 None 则不裁剪）
