@@ -82,6 +82,11 @@ CONFIG_R_STMRF = {
     # ==================== 不确定性学习 ====================
     'use_uncertainty': True,  # 是否启用异方差损失
     'uncertainty_weight': 0.5,  # 不确定性项权重
+    'uncertainty_warmup_epochs': 5,  # 前 N 个 epoch 关闭不确定性损失，只用 MSE+物理损失
+                                      # 先让模型学会"预测准确"，再学会"预测方差"
+    'log_var_min': -10.0,  # log_var 下界（防止方差过小导致 NaN）
+    'log_var_max': 10.0,   # log_var 上界（防止方差过大导致数值溢出）
+    'log_var_regularization': 0.001,  # log_var 正则化权重（惩罚极端方差，鼓励接近 1）
 
     # ==================== 模型保存 ====================
     'save_interval': 5,  # 每隔多少个 epoch 保存一次模型
@@ -136,8 +141,9 @@ def print_config_r_stmrf():
         '训练超参数': ['batch_size', 'lr', 'weight_decay', 'epochs', 'device', 'num_workers', 'use_memmap'],
         '学习率调度': ['scheduler_type', 'warmup_epochs', 'min_lr'],
         '数据划分': ['val_days', 'val_ratio'],
-        '损失权重': ['w_mse', 'w_chapman', 'w_tec_direction', 'physics_loss_freq',
-                     'use_uncertainty', 'uncertainty_weight'],
+        '损失权重': ['w_mse', 'w_chapman', 'w_tec_direction', 'physics_loss_freq'],
+        '不确定性学习': ['use_uncertainty', 'uncertainty_weight', 'uncertainty_warmup_epochs',
+                        'log_var_min', 'log_var_max', 'log_var_regularization'],
         '其他': ['save_interval', 'save_best_only', 'plot_interval', 'early_stopping',
                  'patience', 'grad_clip', 'use_amp'],
     }

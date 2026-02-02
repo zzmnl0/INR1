@@ -92,17 +92,31 @@ def train_one_epoch(model, train_loader, batch_processor, gradient_bank, optimiz
         optimizer: 优化器
         device: 设备
         config: 配置字典
-        epoch: 当前 epoch
+        epoch: 当前 epoch（从 0 开始）
         scaler: GradScaler for AMP (自动混合精度)
 
     Returns:
         avg_loss: 平均损失
-        loss_dict: 各项损失的字典
+        loss_dict: 各项损失的详细字典
+            - mse: 纯预测误差（不受不确定性影响）
+            - nll: 异方差损失（可能为负）
+            - total: 总优化目标
+            - chapman, tec_direction: 物理损失分项
+            - physics_total: 物理损失总和
     """
     model.train()
 
+    # 不确定性 Warm-up 逻辑
+    warmup_epochs = config.get('uncertainty_warmup_epochs', 5)
+    use_uncertainty = config.get('use_uncertainty', True) and (epoch >= warmup_epochs)
+
+    if epoch < warmup_epochs and config.get('use_uncertainty', True):
+        print(f"  [Warm-up] Epoch {epoch+1}/{warmup_epochs}: 使用 MSE+物理损失（关闭不确定性）")
+
+    # 统计变量
     total_loss = 0.0
-    total_mse = 0.0
+    total_mse = 0.0  # 纯 MSE（始终计算）
+    total_nll = 0.0  # NLL 损失（可能为负）
     total_physics = 0.0
     total_chapman = 0.0
     total_tec_direction = 0.0
@@ -132,15 +146,33 @@ def train_one_epoch(model, train_loader, batch_processor, gradient_bank, optimiz
         with torch.amp.autocast('cuda', enabled=use_amp):
             pred_ne, log_var, correction, extras = model(coords, sw_seq, tec_grad_direction)
 
-            # 3. 计算主损失（MSE 或 Huber）
-            if config['use_uncertainty']:
-                # 异方差损失
-                precision = torch.exp(-log_var)
+            # ==================== 3.1 始终计算纯 MSE（用于监控精度）====================
+            pure_mse = F.mse_loss(pred_ne, target_ne)
+
+            # ==================== 3.2 计算主损失（根据 warm-up 状态选择）====================
+            if use_uncertainty:
+                # Warm-up 结束后：使用异方差损失（NLL）
+                # 1. 约束 log_var 范围（防止崩塌）
+                log_var_clamped = torch.clamp(
+                    log_var,
+                    min=config.get('log_var_min', -10.0),
+                    max=config.get('log_var_max', 10.0)
+                )
+
+                # 2. 计算 NLL（可能为负）
+                precision = torch.exp(-log_var_clamped)
                 mse_term = (pred_ne - target_ne) ** 2
-                loss_main = torch.mean(0.5 * precision * mse_term + 0.5 * log_var)
+                nll_loss = torch.mean(0.5 * precision * mse_term + 0.5 * log_var_clamped)
+
+                # 3. 添加 log_var 正则化（惩罚极端方差，鼓励接近 1）
+                log_var_reg = config.get('log_var_regularization', 0.001)
+                log_var_penalty = log_var_reg * (log_var_clamped ** 2).mean()
+
+                loss_main = nll_loss + log_var_penalty
             else:
-                # 简单 MSE
-                loss_main = F.mse_loss(pred_ne, target_ne)
+                # Warm-up 期间或配置关闭：使用纯 MSE
+                loss_main = pure_mse
+                nll_loss = pure_mse  # 用于记录（此时 NLL = MSE）
 
         # 4. 计算物理约束损失（间歇性计算）
         # ⚠️ 关键：物理损失包含二阶导数，必须在AMP外计算（已在physics_losses中禁用AMP）
@@ -194,7 +226,8 @@ def train_one_epoch(model, train_loader, batch_processor, gradient_bank, optimiz
 
         # 7. 统计
         total_loss += loss.item()
-        total_mse += loss_main.item()
+        total_mse += pure_mse.item()  # 纯 MSE
+        total_nll += nll_loss.item() if use_uncertainty else pure_mse.item()  # NLL
         total_physics += physics_dict['physics_total']
         total_chapman += physics_dict['chapman']
         total_tec_direction += physics_dict.get('tec_direction', 0.0)
@@ -202,20 +235,23 @@ def train_one_epoch(model, train_loader, batch_processor, gradient_bank, optimiz
 
         # 更新进度条
         physics_str = f"{physics_dict['physics_total']:.4f}" if compute_physics else "skip"
+        uncertainty_str = "NLL" if use_uncertainty else "MSE"
         pbar.set_postfix({
             'Loss': f"{loss.item():.4f}",
-            'MSE': f"{loss_main.item():.4f}",
+            'Pure_MSE': f"{pure_mse.item():.4f}",
+            'Mode': uncertainty_str,
             'Physics': physics_str
         })
 
     # 平均损失
     avg_loss = total_loss / num_batches
     loss_dict = {
-        'total': avg_loss,
-        'mse': total_mse / num_batches,
-        'physics': total_physics / num_batches,
-        'chapman': total_chapman / num_batches,
-        'tec_direction': total_tec_direction / num_batches
+        'total': avg_loss,                          # 总优化目标
+        'mse': total_mse / num_batches,             # 纯 MSE（精度监控）
+        'nll': total_nll / num_batches,             # NLL 损失（可能为负）
+        'physics_total': total_physics / num_batches,  # 物理损失总和
+        'chapman': total_chapman / num_batches,        # Chapman 平滑
+        'tec_direction': total_tec_direction / num_batches  # TEC 方向
     }
 
     return avg_loss, loss_dict
@@ -489,12 +525,24 @@ def train_r_stmrf(config):
         print(f"  ⚡ 预期加速: ~{physics_freq/2:.1f}× 梯度计算减少")
     else:
         print(f"  📊 物理损失每个batch计算（physics_loss_freq=1）")
+
+    # 不确定性 Warm-up 提示
+    warmup_epochs = config.get('uncertainty_warmup_epochs', 5)
+    if config.get('use_uncertainty', True):
+        print(f"  🔥 不确定性 Warm-up: 前 {warmup_epochs} 个 epoch 使用纯 MSE")
+        print(f"     之后启用异方差损失（NLL），学习预测方差")
+
     print(f"{'='*70}\n")
 
+    # 训练历史记录
     train_losses = []
     val_losses = []
+    history = []  # 详细历史数据（用于三视图绘图和保存）
     best_val_loss = float('inf')
     patience_counter = 0
+
+    # 导入绘图函数
+    from .plotting import plot_training_curves_3panel
 
     for epoch in range(config['epochs']):
         print(f"\n{'='*70}")
@@ -514,14 +562,27 @@ def train_r_stmrf(config):
         # 打印结果
         print(f"\nEpoch {epoch+1} 结果:")
         print(f"  训练损失: {train_loss:.6f}")
-        print(f"    - MSE: {train_dict['mse']:.6f}")
-        print(f"    - Physics: {train_dict['physics']:.6f}")
+        print(f"    - Pure MSE: {train_dict['mse']:.6f}")
+        print(f"    - NLL: {train_dict['nll']:.6f}")
+        print(f"    - Physics: {train_dict['physics_total']:.6f}")
         print(f"      · Chapman: {train_dict['chapman']:.6f}")
         print(f"      · TEC Direction: {train_dict['tec_direction']:.6f}")
         print(f"  验证损失: {val_loss:.6f}")
         print(f"    - MAE: {val_metrics['mae']:.6f}")
         print(f"    - RMSE: {val_metrics['rmse']:.6f}")
         print(f"    - R²: {val_metrics['r2']:.4f}")
+
+        # 收集历史数据
+        history_record = {
+            'epoch': epoch + 1,
+            'train_mse': train_dict['mse'],
+            'val_mse': val_loss,  # 验证集使用纯 MSE
+            'train_nll': train_dict['nll'],
+            'total_loss': train_dict['total'],
+            'chapman': train_dict['chapman'],
+            'tec_direction': train_dict['tec_direction']
+        }
+        history.append(history_record)
 
         # 学习率调度
         if scheduler is not None:
@@ -538,12 +599,19 @@ def train_r_stmrf(config):
         else:
             patience_counter += 1
 
+        # 绘制训练曲线（每个 epoch 更新）
+        # 这样可以实时监控训练状态
+        plot_training_curves_3panel(
+            history,
+            save_path=os.path.join(config['save_dir'], 'training_curves_3panel.png')
+        )
+
         # 早停
         if config['early_stopping'] and patience_counter >= config['patience']:
             print(f"\n早停触发！验证损失连续 {config['patience']} 轮未改善")
             break
 
-        # 定期保存
+        # 定期保存检查点
         if (epoch + 1) % config['save_interval'] == 0:
             save_path = os.path.join(config['save_dir'], f'r_stmrf_epoch_{epoch+1}.pth')
             torch.save(model.state_dict(), save_path)
@@ -552,6 +620,16 @@ def train_r_stmrf(config):
     print("训练完成!")
     print(f"最佳验证损失: {best_val_loss:.6f}")
     print(f"{'='*70}\n")
+
+    # ==================== 7. 保存训练历史 ====================
+    import json
+    history_path = os.path.join(config['save_dir'], 'training_history.json')
+    with open(history_path, 'w') as f:
+        json.dump(history, f, indent=2)
+    print(f"✓ 训练历史已保存: {history_path}")
+
+    # 最终绘图
+    print(f"✓ 最终训练曲线: {os.path.join(config['save_dir'], 'training_curves_3panel.png')}\n")
 
     return model, train_losses, val_losses, train_loader, val_loader, sw_manager, tec_manager, gradient_bank, batch_processor
 
