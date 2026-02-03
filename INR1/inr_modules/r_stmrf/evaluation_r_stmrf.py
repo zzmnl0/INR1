@@ -38,7 +38,9 @@ def evaluate_r_stmrf_model(model, train_loader, val_loader, batch_processor,
         obs_list, pred_list, iri_list = [], [], []
 
         with torch.no_grad():
-            for batch_data in dataloader:
+            # 添加 tqdm 进度条，避免看起来像卡住
+            from tqdm import tqdm
+            for batch_data in tqdm(dataloader, desc=f"    处理 {name} 集", leave=False):
                 # 使用 batch_processor 处理数据
                 coords, target_ne, sw_seq = batch_processor.process_batch(batch_data)
 
@@ -146,7 +148,8 @@ def plot_r_stmrf_parity(model, val_loader, batch_processor, gradient_bank,
     print("  生成 Parity 图数据...")
 
     with torch.no_grad():
-        for batch_data in val_loader:
+        from tqdm import tqdm
+        for batch_data in tqdm(val_loader, desc="    采样数据", leave=False):
             # 处理批次数据
             coords, target_ne, sw_seq = batch_processor.process_batch(batch_data)
 
