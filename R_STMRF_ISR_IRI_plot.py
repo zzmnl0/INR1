@@ -11,6 +11,9 @@ R-STMRF vs ISR vs IRI Comparison Visualization
 
 时间范围: 2024-09-05 05:00 UT - 2024-09-06 05:00 UT
 高度范围: 120 - 500 km
+
+注意：IDE 可能会报告"无法解析导入"警告，这是正常的，因为模块路径是在运行时动态添加的。
+运行时导入将正常工作。
 """
 
 import os
@@ -27,19 +30,30 @@ import warnings
 
 warnings.filterwarnings('ignore', category=RuntimeWarning)
 
-# Add INR1 module path
+# Add INR1 module path to sys.path for imports
 current_dir = os.path.dirname(os.path.abspath(__file__))
 inr1_module_path = os.path.join(current_dir, 'INR1', 'inr_modules')
 if inr1_module_path not in sys.path:
     sys.path.insert(0, inr1_module_path)
 
+# Verify path exists
+if not os.path.exists(inr1_module_path):
+    raise RuntimeError(f"INR1 module path not found: {inr1_module_path}")
+
 # Import R-STMRF components
-from r_stmrf.r_stmrf_model import R_STMRF_Model
-from r_stmrf.tec_gradient_bank import TecGradientBank
-from r_stmrf.sliding_dataset import SlidingWindowBatchProcessor
-from data_managers.space_weather_manager import SpaceWeatherManager
-from data_managers.tec_data_manager import TECDataManager
-from utils.iri_neural_proxy import IRINeuralProxy
+try:
+    from r_stmrf.r_stmrf_model import R_STMRF_Model
+    from r_stmrf.tec_gradient_bank import TecGradientBank
+    from r_stmrf.sliding_dataset import SlidingWindowBatchProcessor
+    from data_managers.space_weather_manager import SpaceWeatherManager
+    from data_managers.tec_manager import TECDataManager
+    from data_managers.irinc_neural_proxy import IRINeuralProxy
+except ImportError as e:
+    print(f"Error importing modules. Make sure you're running from the correct directory.")
+    print(f"Current directory: {current_dir}")
+    print(f"INR1 module path: {inr1_module_path}")
+    print(f"sys.path: {sys.path}")
+    raise
 
 # ==========================================
 # Configuration
