@@ -192,12 +192,12 @@ def plot_r_stmrf_parity(model, val_loader, batch_processor, gradient_bank,
     axis_min = np.floor(global_min * 10) / 10
     axis_max = np.ceil(global_max * 10) / 10
 
-    title_iri = (f'IRI-2020 vs 观测\n'
+    title_iri = (f'IRI-2020 vs Observations\n'
                  f'RMSE={rmse_iri:.4f} | R²={r2_iri:.4f} | R={r_iri:.4f}')
-    title_inr = (f'R-STMRF (TEC Gradient Bank) vs 观测\n'
+    title_inr = (f'R-STMRF (TEC Gradient Bank) vs Observations\n'
                  f'RMSE={rmse_inr:.4f} | R²={r2_inr:.4f} | R={r_inr:.4f}')
 
-    # 绘制散点图
+    # Parity plot
     fig1, ax1 = plt.subplots(1, 2, figsize=(16, 7), dpi=150)
 
     def draw_scatter(axis, x, y, title_text, color):
@@ -205,8 +205,8 @@ def plot_r_stmrf_parity(model, val_loader, batch_processor, gradient_bank,
         axis.plot([axis_min, axis_max], [axis_min, axis_max],
                  'r--', lw=2, alpha=0.8, label='1:1 Line')
         axis.set_title(title_text, fontsize=12, fontweight='bold')
-        axis.set_xlabel('观测 Ne (log10)', fontsize=11)
-        axis.set_ylabel('模型 Ne (log10)', fontsize=11)
+        axis.set_xlabel(r'Observed $N_e$ ($\log_{10}$)', fontsize=11)
+        axis.set_ylabel(r'Model $N_e$ ($\log_{10}$)', fontsize=11)
         axis.set_xlim(axis_min, axis_max)
         axis.set_ylim(axis_min, axis_max)
         axis.set_aspect('equal')
@@ -220,9 +220,9 @@ def plot_r_stmrf_parity(model, val_loader, batch_processor, gradient_bank,
     scatter_path = os.path.join(save_dir, 'parity_scatter_r_stmrf.png')
     plt.savefig(scatter_path, dpi=150)
     plt.close(fig1)
-    print(f"  ✓ 散点图已保存: {scatter_path}")
+    print(f"  ✓ Scatter plot saved: {scatter_path}")
 
-    # 绘制密度图
+    # Density plot
     fig2, ax2 = plt.subplots(1, 2, figsize=(17, 7), dpi=150)
     plot_range = [[axis_min, axis_max], [axis_min, axis_max]]
     bins = 400
@@ -233,15 +233,15 @@ def plot_r_stmrf_parity(model, val_loader, batch_processor, gradient_bank,
         axis.plot([axis_min, axis_max], [axis_min, axis_max],
                  'r--', lw=1.5, alpha=0.8, label='1:1 Line')
         axis.set_title(title_text, fontsize=12, fontweight='bold')
-        axis.set_xlabel('观测 Ne (log10)', fontsize=11)
-        axis.set_ylabel('模型 Ne (log10)', fontsize=11)
+        axis.set_xlabel(r'Observed $N_e$ ($\log_{10}$)', fontsize=11)
+        axis.set_ylabel(r'Model $N_e$ ($\log_{10}$)', fontsize=11)
         axis.set_aspect('equal')
         axis.grid(True, linestyle=':', alpha=0.4)
         axis.legend(fontsize=10)
 
         divider = make_axes_locatable(axis)
         cax = divider.append_axes("right", size="3%", pad=0.05)
-        plt.colorbar(h[3], cax=cax, label='计数 (对数尺度)')
+        plt.colorbar(h[3], cax=cax, label='Counts (Log Scale)')
 
     draw_density(ax2[0], obs, iri, title_iri)
     draw_density(ax2[1], obs, inr, title_inr)
@@ -250,7 +250,7 @@ def plot_r_stmrf_parity(model, val_loader, batch_processor, gradient_bank,
     density_path = os.path.join(save_dir, 'parity_density_r_stmrf.png')
     plt.savefig(density_path, dpi=150)
     plt.close(fig2)
-    print(f"  ✓ 密度图已保存: {density_path}")
+    print(f"  ✓ Density plot saved: {density_path}")
 
 
 def plot_r_stmrf_altitude_profile(model, sw_manager, gradient_bank, device,
@@ -371,11 +371,11 @@ def plot_r_stmrf_altitude_profile(model, sw_manager, gradient_bank, device,
             for ax in ax_row:
                 ax.set_xlabel('Longitude', fontsize=10)
 
-    # 总标题
+    # Main title
     plt.suptitle(
-        f'R-STMRF 重构结果 Day {target_day}, {target_hour:02.0f}:00 UT '
+        f'R-STMRF Reconstruction Day {target_day}, {target_hour:02.0f}:00 UT '
         f'(Kp={kp_disp:.1f}, F10.7={f107_disp:.1f})\n'
-        f'架构: TEC Gradient Direction Constraint + Space Weather Modulation',
+        f'Architecture: TEC Gradient Direction Constraint + Space Weather Modulation',
         fontsize=14, fontweight='bold', y=1.01
     )
 
@@ -386,4 +386,4 @@ def plot_r_stmrf_altitude_profile(model, sw_manager, gradient_bank, device,
     plt.savefig(save_path, dpi=120, bbox_inches='tight')
     plt.close()
 
-    print(f"  ✓ 剖面已保存: {save_path}")
+    print(f"  ✓ Altitude profile saved: {save_path}")
