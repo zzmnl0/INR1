@@ -33,7 +33,7 @@ def plot_training_curves_3panel(history, save_path='training_curves_3panel.png')
         save_path: 保存路径
     """
     if len(history) == 0:
-        print("⚠️  警告: history 为空，跳过绘图")
+        print("⚠️  Warning: history is empty, skipping plot")
         return
 
     epochs = [h['epoch'] for h in history]
@@ -51,31 +51,31 @@ def plot_training_curves_3panel(history, save_path='training_curves_3panel.png')
     # 创建画布（3 行 1 列，共享 X 轴）
     fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 15), sharex=True)
 
-    # ==================== 图 1: 精度监控 (Pure MSE) ====================
-    # 使用对数坐标，因为 MSE 下降后期变化很小，线性坐标看不清
+    # ==================== Panel 1: Accuracy Monitoring (Pure MSE) ====================
+    # Log scale used for better visualization of MSE convergence
     ax1.plot(epochs, train_mse, label='Train Pure MSE', color='blue', linewidth=2, marker='o', markersize=3)
     ax1.plot(epochs, val_mse, label='Val MSE', color='orange', linestyle='--', linewidth=2, marker='s', markersize=3)
-    ax1.set_yscale('log')  # 对数坐标
+    ax1.set_yscale('log')
     ax1.set_ylabel('MSE (Log Scale)', fontsize=12)
-    ax1.set_title('1. Model Accuracy (Pure MSE)\n用于判断模型是否拟合真实数据（排除方差干扰）',
+    ax1.set_title('1. Model Accuracy (Pure MSE)\nMonitoring prediction quality without uncertainty interference',
                   fontsize=13, fontweight='bold')
     ax1.grid(True, which="both", ls="-", alpha=0.2)
     ax1.legend(loc='upper right', fontsize=11)
 
-    # ==================== 图 2: 优化目标 (Total Loss & NLL) ====================
-    # 使用线性坐标，因为 NLL 可能是负数
+    # ==================== Panel 2: Optimization Objective (Total Loss & NLL) ====================
+    # Linear scale used because NLL can be negative
     ax2.plot(epochs, total_loss, label='Total Loss (Optimizer Target)', color='black', linewidth=2, marker='o', markersize=3)
     ax2.plot(epochs, train_nll, label='NLL Term (Uncertainty)', color='green', linestyle=':', linewidth=2, alpha=0.7)
-    ax2.axhline(y=0, color='red', linestyle='-', linewidth=1, alpha=0.3, label='Zero Line')  # 0轴参考线
+    ax2.axhline(y=0, color='red', linestyle='-', linewidth=1, alpha=0.3, label='Zero Line')
     ax2.set_ylabel('Loss Value (Linear)', fontsize=12)
-    ax2.set_title('2. Optimization Objective (May Contain Negative Values)\n观察优化器的工作状态',
+    ax2.set_title('2. Optimization Objective (May Contain Negative Values)\nMonitoring optimizer behavior',
                   fontsize=13, fontweight='bold')
     ax2.grid(True, alpha=0.3)
     ax2.legend(loc='upper right', fontsize=11)
 
-    # ==================== 图 3: 物理约束 ====================
-    # 使用对数坐标，因为物理损失通常下降很快，且量级可能不同
-    # 过滤掉 0 值（对数坐标无法显示）
+    # ==================== Panel 3: Physics Constraints ====================
+    # Log scale used for physics losses (fast convergence with varying scales)
+    # Filter out zero values (cannot be displayed on log scale)
     chapman_nonzero = [c if c > 0 else np.nan for c in chapman]
     tec_nonzero = [t if t > 0 else np.nan for t in tec_direction]
 
@@ -83,7 +83,7 @@ def plot_training_curves_3panel(history, save_path='training_curves_3panel.png')
     ax3.plot(epochs, tec_nonzero, label='TEC Direction Constraint', color='brown', linewidth=2, marker='s', markersize=3)
     ax3.set_yscale('log')
     ax3.set_ylabel('Constraint Loss (Log Scale)', fontsize=12)
-    ax3.set_title('3. Physics Constraints\n观察物理约束是否生效，是否收敛',
+    ax3.set_title('3. Physics Constraints\nMonitoring constraint effectiveness and convergence',
                   fontsize=13, fontweight='bold')
     ax3.set_xlabel('Epochs', fontsize=12)
     ax3.grid(True, which="both", ls="-", alpha=0.2)
@@ -92,7 +92,7 @@ def plot_training_curves_3panel(history, save_path='training_curves_3panel.png')
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
-    print(f"  ✓ 三视图训练曲线已保存: {save_path}")
+    print(f"  ✓ 3-panel training curves saved: {save_path}")
 
 
 def plot_simple_loss_curve(train_losses, val_losses, save_path='loss_curve_simple.png'):
@@ -115,7 +115,7 @@ def plot_simple_loss_curve(train_losses, val_losses, save_path='loss_curve_simpl
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches='tight')
     plt.close()
-    print(f"  ✓ 简单损失曲线已保存: {save_path}")
+    print(f"  ✓ Simple loss curve saved: {save_path}")
 
 
 # ======================== 测试代码 ========================
