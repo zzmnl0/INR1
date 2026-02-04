@@ -2,10 +2,45 @@
 R-STMRF 模型配置文件
 
 包含所有训练和模型的全局配置参数
+
+性能优化：
+- 自动检测CUDA并启用GPU加速优化
+- 多进程数据加载
+- 混合精度训练（AMP）
+- DataLoader预取
 """
 
 import torch
 import os
+
+# ==================== 自动检测CUDA并设置优化参数 ====================
+_CUDA_AVAILABLE = torch.cuda.is_available()
+_DEVICE = 'cuda' if _CUDA_AVAILABLE else 'cpu'
+
+if _CUDA_AVAILABLE:
+    print(f"✓ CUDA detected: {torch.cuda.get_device_name(0)}")
+    print(f"  CUDA version: {torch.version.cuda}")
+    print(f"  GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+
+    # GPU优化配置
+    _BATCH_SIZE = 4096  # 增大batch提高GPU利用率
+    _NUM_WORKERS = 4  # 多进程数据加载
+    _USE_AMP = True  # 启用混合精度训练
+    _PIN_MEMORY = True  # 启用pin memory加速CPU-GPU传输
+    _PREFETCH_FACTOR = 2  # 预取2个batch
+    _PERSISTENT_WORKERS = True  # 保持worker进程
+    print("  ✓ GPU optimizations enabled")
+else:
+    print("⚠️  CUDA not available, using CPU")
+
+    # CPU配置
+    _BATCH_SIZE = 2048
+    _NUM_WORKERS = 2  # CPU也启用多进程
+    _USE_AMP = False  # CPU不支持AMP
+    _PIN_MEMORY = False
+    _PREFETCH_FACTOR = 2
+    _PERSISTENT_WORKERS = False
+    print("  ✓ CPU optimizations enabled")
 
 CONFIG_R_STMRF = {
     # ==================== 数据路径 ====================
@@ -48,13 +83,16 @@ CONFIG_R_STMRF = {
     # - 训练时使用 memory-mapped loading + 时间插值
 
     # ==================== 训练超参数 ====================
-    'batch_size': 2048,  # 批次大小（ConvLSTM 不随 batch 增长，可使用大 batch）
+    'batch_size': _BATCH_SIZE,  # 批次大小（自动调整：GPU=4096, CPU=2048）
     'lr': 3e-4,  # 学习率
     'weight_decay': 1e-4,  # 权重衰减
     'epochs': 2,  # 训练轮数
     'seed': 42,
-    'device': 'cuda' if torch.cuda.is_available() else 'cpu',
-    'num_workers': 0,  # DataLoader 工作进程数
+    'device': _DEVICE,  # 自动检测 CUDA
+    'num_workers': _NUM_WORKERS,  # 多进程数据加载（自动调整：GPU=4, CPU=2）
+    'pin_memory': _PIN_MEMORY,  # Pin memory加速CPU-GPU传输
+    'prefetch_factor': _PREFETCH_FACTOR,  # 预取batch数量
+    'persistent_workers': _PERSISTENT_WORKERS,  # 保持worker进程（减少启动开销）
     'use_memmap': False,  # 是否使用内存映射按需加载数据（节省内存，略慢）
                           # True: Memory-mapped loading (低内存占用，适合大数据集)
                           # False: 全量加载到内存 (高性能，需要足够内存)
@@ -105,7 +143,7 @@ CONFIG_R_STMRF = {
     'grad_clip': 1.0,  # 梯度裁剪阈值（设为 None 则不裁剪）
 
     # ==================== 混合精度训练 ====================
-    'use_amp': False,  # 是否使用自动混合精度（AMP）
+    'use_amp': _USE_AMP,  # 自动混合精度（GPU自动启用，CPU禁用）
 
     # ==================== TEC 梯度对齐参数 ====================
     'tec_gradient_threshold_percentile': 50.0,  # TEC 梯度显著性阈值（百分位数）
@@ -138,7 +176,8 @@ def print_config_r_stmrf():
         '时序参数': ['seq_len'],
         'SIREN 架构': ['basis_dim', 'siren_hidden', 'siren_layers', 'omega_0'],
         '循环网络': ['env_hidden_dim', 'lstm_layers', 'lstm_dropout'],
-        '训练超参数': ['batch_size', 'lr', 'weight_decay', 'epochs', 'device', 'num_workers', 'use_memmap'],
+        '训练超参数': ['batch_size', 'lr', 'weight_decay', 'epochs', 'device', 'num_workers',
+                        'pin_memory', 'prefetch_factor', 'persistent_workers', 'use_memmap'],
         '学习率调度': ['scheduler_type', 'warmup_epochs', 'min_lr'],
         '数据划分': ['val_days', 'val_ratio'],
         '损失权重': ['w_mse', 'w_chapman', 'w_tec_direction', 'physics_loss_freq'],
