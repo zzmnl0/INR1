@@ -429,19 +429,32 @@ def train_r_stmrf(config):
         drop_last=False
     )
 
-    # 创建 DataLoader（使用 batch_sampler）
+    # 创建 DataLoader（使用 batch_sampler + 性能优化）
+    # 性能优化参数：
+    # - pin_memory: 加速CPU-GPU传输
+    # - prefetch_factor: 预取batch数量
+    # - persistent_workers: 保持worker进程（减少启动开销）
+    dataloader_kwargs = {
+        'batch_sampler': None,  # 会在下面设置
+        'num_workers': config.get('num_workers', 0),
+        'pin_memory': config.get('pin_memory', device.type == 'cuda'),
+    }
+
+    # 添加prefetch参数（仅当num_workers > 0时）
+    if config.get('num_workers', 0) > 0:
+        dataloader_kwargs['prefetch_factor'] = config.get('prefetch_factor', 2)
+        dataloader_kwargs['persistent_workers'] = config.get('persistent_workers', False)
+
     train_loader = DataLoader(
         train_dataset,
         batch_sampler=train_sampler,
-        num_workers=config['num_workers'],
-        pin_memory=True if device.type == 'cuda' else False
+        **dataloader_kwargs
     )
 
     val_loader = DataLoader(
         val_dataset,
         batch_sampler=val_sampler,
-        num_workers=config['num_workers'],
-        pin_memory=True if device.type == 'cuda' else False
+        **dataloader_kwargs
     )
 
     print(f"  训练批次: {len(train_loader)} | 验证批次: {len(val_loader)}")

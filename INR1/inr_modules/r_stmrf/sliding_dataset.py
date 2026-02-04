@@ -42,6 +42,11 @@ class SlidingWindowBatchProcessor:
         TEC 梯度方向现在通过 TecGradientBank 离线预计算 + 时间插值获得，
         不再需要在此处加载 TEC 地图序列
 
+        性能优化：
+        - 使用单次 CPU-GPU 传输（而非5次）
+        - 使用 non_blocking=True 异步传输
+        - 避免不必要的内存分配
+
         Args:
             batch_data: [Batch, 5] Tensor
                 Columns: [Lat, Lon, Alt, Time, Ne_Log]
@@ -51,18 +56,16 @@ class SlidingWindowBatchProcessor:
             target_ne: [Batch, 1] 真值 Ne（对数）
             sw_seq: [Batch, Seq, 2] 空间天气序列
         """
-        # 解析批次数据
-        lat = batch_data[:, 0].to(self.device)
-        lon = batch_data[:, 1].to(self.device)
-        alt = batch_data[:, 2].to(self.device)
-        time = batch_data[:, 3].to(self.device)
-        target_ne = batch_data[:, 4].unsqueeze(1).to(self.device)
+        # 优化：单次传输整个batch（减少CPU-GPU通信开销）
+        # non_blocking=True允许异步传输，提高吞吐量
+        batch_data = batch_data.to(self.device, non_blocking=True)
 
-        # 构建坐标
-        coords = torch.stack([lat, lon, alt, time], dim=1)  # [Batch, 4]
+        # 解析批次数据（在GPU上进行切片，无额外传输）
+        coords = batch_data[:, :4]  # [Batch, 4] - (Lat, Lon, Alt, Time)
+        target_ne = batch_data[:, 4:5]  # [Batch, 1] - Ne_Log
 
         # 查询空间天气序列（点级查询）
-        sw_seq = self.sw_manager.get_drivers_sequence(time)  # [Batch, Seq, 2]
+        sw_seq = self.sw_manager.get_drivers_sequence(coords[:, 3])  # [Batch, Seq, 2]
 
         return coords, target_ne, sw_seq
 

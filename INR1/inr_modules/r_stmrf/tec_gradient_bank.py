@@ -42,12 +42,14 @@ class TecGradientBank:
             - H, W: 空间分辨率 (73, 73)
     """
 
-    def __init__(self, gradient_bank_path, total_hours=720, device='cuda'):
+    def __init__(self, gradient_bank_path, total_hours=720, device='cuda', preload_to_gpu=None):
         """
         Args:
             gradient_bank_path: 预计算的梯度库文件路径 (*.npy)
             total_hours: 总时长（小时），用于边界检查
             device: 计算设备
+            preload_to_gpu: 是否预加载到GPU（None=自动检测，True=强制，False=禁用）
+                          自动检测：CUDA可用时预加载，CPU时使用mmap
         """
         print(f"[TecGradientBank] 初始化梯度库...")
 
@@ -58,15 +60,14 @@ class TecGradientBank:
         self.total_hours = total_hours
         self.device = device
 
-        # 内存映射加载（只映射到虚拟内存，不加载到 RAM）
-        # mmap_mode='r': 只读模式，OS 自动管理缓存
-        self.gradient_bank = np.load(gradient_bank_path, mmap_mode='r')
+        # 内存映射加载（先加载元数据）
+        gradient_bank_mmap = np.load(gradient_bank_path, mmap_mode='r')
 
         # 验证形状
-        if self.gradient_bank.ndim != 4:
-            raise ValueError(f"期望 4D 数据 (T, 2, H, W)，实际形状: {self.gradient_bank.shape}")
+        if gradient_bank_mmap.ndim != 4:
+            raise ValueError(f"期望 4D 数据 (T, 2, H, W)，实际形状: {gradient_bank_mmap.shape}")
 
-        T, C, H, W = self.gradient_bank.shape
+        T, C, H, W = gradient_bank_mmap.shape
 
         if C != 2:
             raise ValueError(f"期望 2 个通道 (grad_lat, grad_lon)，实际通道数: {C}")
@@ -75,12 +76,33 @@ class TecGradientBank:
         self.height = H
         self.width = W
 
-        print(f"  ✓ 梯度库加载成功 (Memory-Mapped)")
-        print(f"    形状: {self.gradient_bank.shape}")
-        print(f"    数据类型: {self.gradient_bank.dtype}")
+        # 自动检测是否预加载到GPU
+        if preload_to_gpu is None:
+            preload_to_gpu = (device == 'cuda')
+
+        # 性能优化：预加载到GPU（显著减少CPU-GPU传输）
+        if preload_to_gpu and device == 'cuda':
+            print(f"  ✓ 预加载到 GPU ({device})...")
+            # 一次性加载所有数据到GPU
+            self.gradient_bank_gpu = torch.from_numpy(
+                gradient_bank_mmap[:].astype(np.float32)
+            ).to(device)
+            self.use_gpu_cache = True
+            gpu_memory_mb = self.gradient_bank_gpu.element_size() * self.gradient_bank_gpu.nelement() / 1e6
+            print(f"    ✓ GPU预加载完成")
+            print(f"    GPU内存占用: {gpu_memory_mb:.2f} MB")
+            print(f"    ⚡ 性能提升: 消除每个batch的CPU-GPU传输")
+        else:
+            # 使用memory-mapped模式（CPU或显存不足时）
+            self.gradient_bank = gradient_bank_mmap
+            self.use_gpu_cache = False
+            print(f"  ✓ 梯度库加载成功 (Memory-Mapped)")
+            print(f"    内存占用: < 10 MB (按需读取)")
+
+        print(f"    形状: {gradient_bank_mmap.shape}")
+        print(f"    数据类型: {gradient_bank_mmap.dtype}")
         print(f"    时间范围: [0, {self.num_hours - 1}] 小时")
         print(f"    空间分辨率: {H} × {W}")
-        print(f"    内存占用: < 10 MB (按需读取)")
 
     def get_interpolated_gradient(self, timestamps):
         """
@@ -136,14 +158,17 @@ class TecGradientBank:
         # 4. 批量读取梯度地图（去重以减少磁盘 I/O）
         # 合并 floor 和 ceil 索引，去重
         unique_indices = torch.unique(torch.cat([time_floor, time_ceil]))
-        unique_indices_np = unique_indices.cpu().numpy()
 
-        # 从磁盘读取唯一时间步的梯度地图
-        # gradient_bank: (T, 2, H, W) mmap array
-        unique_grads = self.gradient_bank[unique_indices_np]  # [N_unique, 2, H, W]
-
-        # 转换为 torch tensor 并移动到目标设备
-        unique_grads = torch.from_numpy(unique_grads.astype(np.float32)).to(self.device)
+        # 性能优化：使用GPU缓存（如果可用）
+        if self.use_gpu_cache:
+            # 直接从GPU tensor索引（无CPU-GPU传输）
+            unique_grads = self.gradient_bank_gpu[unique_indices]  # [N_unique, 2, H, W]
+        else:
+            # 从磁盘读取（memory-mapped）
+            unique_indices_np = unique_indices.cpu().numpy()
+            unique_grads = self.gradient_bank[unique_indices_np]  # [N_unique, 2, H, W]
+            # 转换为 torch tensor 并移动到目标设备
+            unique_grads = torch.from_numpy(unique_grads.astype(np.float32)).to(self.device)
 
         # 5. 创建索引映射（unique_indices → local_idx）
         index_map = {idx.item(): i for i, idx in enumerate(unique_indices)}
@@ -192,11 +217,16 @@ class TecGradientBank:
         # 边界检查
         hour_indices = np.clip(hour_indices, 0, self.num_hours - 1)
 
-        # 从磁盘读取
-        grads = self.gradient_bank[hour_indices]  # [N_hours, 2, H, W]
-
-        # 转换为 torch tensor
-        grads = torch.from_numpy(grads.astype(np.float32)).to(self.device)
+        # 性能优化：使用GPU缓存（如果可用）
+        if self.use_gpu_cache:
+            # 直接从GPU tensor索引
+            hour_indices_tensor = torch.from_numpy(hour_indices).to(self.device)
+            grads = self.gradient_bank_gpu[hour_indices_tensor]  # [N_hours, 2, H, W]
+        else:
+            # 从磁盘读取
+            grads = self.gradient_bank[hour_indices]  # [N_hours, 2, H, W]
+            # 转换为 torch tensor
+            grads = torch.from_numpy(grads.astype(np.float32)).to(self.device)
 
         return grads
 
