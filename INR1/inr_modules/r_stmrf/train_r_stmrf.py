@@ -435,7 +435,6 @@ def train_r_stmrf(config):
     # - prefetch_factor: 预取batch数量
     # - persistent_workers: 保持worker进程（减少启动开销）
     dataloader_kwargs = {
-        'batch_sampler': None,  # 会在下面设置
         'num_workers': config.get('num_workers', 0),
         'pin_memory': config.get('pin_memory', device.type == 'cuda'),
     }
