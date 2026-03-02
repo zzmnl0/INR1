@@ -15,6 +15,12 @@ R-STMRF vs ISR vs IRI Comparison Visualization
 模型: R-STMRF (best_r_stmrf_model.pth from main_r_stmrf.py)
 架构: 物理引导的循环时空调制残差场
     Ne = IRI_frozen + Decoder(h_spatial_modulated, h_temporal_modulated)
+
+推理说明:
+    tec_grad_direction 在 R_STMRF_Model.forward() 中仅存于 extra_outputs，
+    不参与 output/log_var 的数值计算（只在训练时用于物理损失），
+    因此推理时固定传入零张量，无需加载 TecGradientBank。
+    TECDataManager 同理：model.__init__ 仅存储引用，forward() 从不调用。
 """
 
 import os
@@ -43,11 +49,10 @@ if not os.path.exists(inr_module_path):
     raise RuntimeError(f"inr_modules 路径不存在: {inr_module_path}")
 
 # Import R-STMRF model and data managers
+# 注意：推理不需要 TecGradientBank / TECDataManager，不在此导入
 try:
     from r_stmrf.r_stmrf_model import R_STMRF_Model
-    from r_stmrf.tec_gradient_bank import TecGradientBank
     from data_managers.space_weather_manager import SpaceWeatherManager
-    from data_managers.tec_manager import TECDataManager
     from data_managers.irinc_neural_proxy import IRINeuralProxy
 except ImportError as e:
     print(f"[ERROR] 模块导入失败: {e}")
@@ -62,8 +67,6 @@ CONFIG = {
     # Data paths
     'iri_proxy_path': r"D:\code11\IRI01\output_results\iri_september_full_proxy.pth",
     'sw_path': r'D:\FYsatellite\EDP_data\kp\OMNI_Kp_F107_20240901_20241001.txt',
-    'tec_path': r'D:\IGS\VTEC\tec_map_data.npy',
-    'gradient_bank_path': r'D:\IGS\VTEC\tec_gradient_bank.npy',  # 预计算的 TEC 梯度库
     'model_weights': r"./checkpoints_r_stmrf/best_r_stmrf_model.pth",  # R-STMRF 模型权重
     'isr_filepath': r'D:\ISR\DATA\10jicamarca_is_radar(~12°S,低纬磁赤道)\jro20240905_050002.hdf5',
 
@@ -118,7 +121,7 @@ def initialize_model(config):
     device = torch.device(config['device'])
     print(f"Using device: {device}")
 
-    # Space Weather Manager
+    # Space Weather Manager (推理时唯一需要的数据管理器)
     print("Initializing Space Weather Manager...")
     sw_manager = SpaceWeatherManager(
         txt_path=config['sw_path'],
@@ -128,31 +131,6 @@ def initialize_model(config):
         device=device
     )
 
-    # TEC Manager (保留用于 R_STMRF_Model 兼容性，v2.0+ 架构中不参与在线推理)
-    print("Initializing TEC Data Manager...")
-    tec_manager = TECDataManager(
-        tec_map_path=config['tec_path'],
-        total_hours=config['total_hours'],
-        seq_len=config['seq_len'],
-        device=device
-    )
-
-    # TEC Gradient Bank (预计算梯度库，推理时 tec_grad_direction 不影响预测值)
-    gradient_bank = None
-    gradient_bank_path = config.get('gradient_bank_path', '')
-    if gradient_bank_path and os.path.exists(gradient_bank_path):
-        print("Loading TEC Gradient Bank (offline pre-computed)...")
-        gradient_bank = TecGradientBank(
-            gradient_bank_path=gradient_bank_path,
-            total_hours=config['total_hours'],
-            device=device
-        )
-    else:
-        print("TEC Gradient Bank not found or path not set.")
-        print("  -> 推理时将使用零张量代替 tec_grad_direction（不影响预测值）")
-        print("     (R_STMRF_Model.forward 中 tec_grad_direction 仅存于 extra_outputs，")
-        print("      不参与 Ne 的数值计算)")
-
     # IRI Neural Proxy
     print("Loading IRI Neural Proxy...")
     iri_proxy = IRINeuralProxy(layers=[4, 128, 128, 128, 128, 1]).to(device)
@@ -161,6 +139,7 @@ def initialize_model(config):
     iri_proxy.eval()
 
     # R-STMRF Model
+    # tec_manager=None: R_STMRF_Model.__init__ 仅存 self.tec_manager，forward() 从不调用
     print("Initializing R-STMRF Model...")
     model = R_STMRF_Model(
         iri_proxy=iri_proxy,
@@ -168,7 +147,7 @@ def initialize_model(config):
         lon_range=config['lon_range'],
         alt_range=config['alt_range'],
         sw_manager=sw_manager,
-        tec_manager=tec_manager,
+        tec_manager=None,
         start_date_str=config['start_date_str'],
         config=config
     ).to(device)
@@ -180,20 +159,19 @@ def initialize_model(config):
     model.eval()
     print("Model loaded successfully.")
 
-    return model, sw_manager, gradient_bank, device
+    return model, sw_manager, device
 
 
 # ==========================================
 # R-STMRF and IRI Inference for Time-Altitude Profile
 # ==========================================
-def run_inr_iri_profile(model, sw_manager, gradient_bank, config, device):
+def run_inr_iri_profile(model, sw_manager, config, device):
     """
     Run R-STMRF and IRI inference for a single location over time and altitude.
 
-    关键差异 (相较于旧版 PhysicsGuidedINR):
-        - forward() 返回 4 个值: (output, log_var, correction, extra_outputs)
-        - tec_grad_direction: 从 TecGradientBank 获取，或使用零张量占位
-        - sw_seq: 逐点查询 (get_drivers_sequence(batch_times))，非均值展开
+    forward() 签名: model(coords, sw_seq, tec_grad_direction) -> (output, log_var, correction, extras)
+    tec_grad_direction 固定为零张量：它在 forward() 中仅存于 extra_outputs，
+    不参与 output/log_var 的任何数值计算，物理损失只在训练时使用。
 
     Returns:
         timestamps: datetime 数组
@@ -263,13 +241,9 @@ def run_inr_iri_profile(model, sw_manager, gradient_bank, config, device):
         batch_times = batch_coords[:, 3]  # [Batch]
         sw_seq = sw_manager.get_drivers_sequence(batch_times)  # [Batch, Seq, 2]
 
-        # Get TEC gradient direction
-        # 推理时 tec_grad_direction 仅存于 extra_outputs，不影响 Ne 预测值
-        if gradient_bank is not None:
-            tec_grad_direction = gradient_bank.get_interpolated_gradient(batch_times)
-        else:
-            # 使用零张量占位 (73×73 是 TecGradientBank 的标准空间分辨率)
-            tec_grad_direction = torch.zeros(batch_n, 2, 73, 73, device=device)
+        # tec_grad_direction: forward() 必需参数，但推理时不影响任何输出值
+        # 固定传入零张量（73×73 是 TecGradientBank 的标准空间分辨率）
+        tec_grad_direction = torch.zeros(batch_n, 2, 73, 73, device=device)
 
         # Run model
         with torch.no_grad():
@@ -685,13 +659,13 @@ def main():
     print("=" * 60)
 
     # 1. Initialize model
-    model, sw_manager, gradient_bank, device = initialize_model(CONFIG)
+    model, sw_manager, device = initialize_model(CONFIG)
 
     # 2. Run R-STMRF and IRI inference
     print("\n" + "=" * 60)
     print("Running R-STMRF and IRI inference...")
     inr_timestamps, inr_altitudes, inr_ne, iri_ne, log_var_ne = run_inr_iri_profile(
-        model, sw_manager, gradient_bank, CONFIG, device
+        model, sw_manager, CONFIG, device
     )
 
     # 3. Read ISR data
